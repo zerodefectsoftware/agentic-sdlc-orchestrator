@@ -121,7 +121,8 @@ override:
     stage: verification
     role: test-author
     needs: [design-approval]
-    inputs: [intake.artifacts.register, impact-analysis.artifacts.report]
+    inputs: [intake.artifacts.register, design.artifacts.spec,
+             impact-analysis.artifacts.report]
     outputs: [suite]
     write_scope: ["{target.tests_root}/**"]
     verify:
@@ -142,6 +143,7 @@ override:
     template:
       kind: codeagent
       role: implementer
+      inputs: [design.artifacts.spec, impact-analysis.artifacts.report]
       write_scope: ["{target.root}/{item.path}/**"]
       verify:
         - "sh:{target.commands.lint_path} {target.root}/{item.path}"

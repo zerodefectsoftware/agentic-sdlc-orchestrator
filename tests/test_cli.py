@@ -11,6 +11,7 @@ from __future__ import annotations
 import textwrap
 
 import pytest
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from orchestrator.artifacts import Baseline
@@ -19,7 +20,7 @@ from orchestrator.config import get_settings, reset_settings
 from orchestrator.lineage import recorder
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
-from orchestrator.state.models import Run, RunStatus
+from orchestrator.state.models import NodeStatus, Run, RunStatus
 
 PLAN = """
 plan: demo
@@ -416,3 +417,57 @@ def test_a_plan_with_no_restore_point_refuses_to_roll_back(cli, workspace):
 
     assert result.exit_code == 1
     assert "declares no rollback" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# escalation — approving one has to do something to the node it was raised for
+# --------------------------------------------------------------------------- #
+
+BROKEN = """
+plan: demo
+version: 1
+nodes:
+  - id: build
+    kind: tool
+    stage: implementation
+    run: sh:make
+    gate: {all: ["coverage.percent >= 80"]}
+  - id: ship
+    kind: tool
+    stage: release
+    needs: [build]
+    run: sh:true
+"""
+
+
+def escalated(cli, workspace) -> str:
+    """A run stopped at an escalation raised by an unperformable check."""
+    (workspace / "plans" / "demo.yaml").write_text(textwrap.dedent(BROKEN))
+    invoke(
+        cli, workspace,
+        "run",
+        "--plan", str(workspace / "plans" / "demo.yaml"),
+        "--requirement", str(workspace / "requirement.md"),
+        "--target", str(workspace / "target.yaml"),
+    )
+    with store.Store().session() as session:
+        run = session.scalars(select(Run)).all()[-1]
+        return run.id
+
+
+def test_approving_an_error_escalation_re_enters_the_node(cli, workspace):
+    """The live run that found this: `scaffold` ERRORed on a missing input, and
+    approving the escalation left it errored forever with the run deadlocked."""
+    run_id = escalated(cli, workspace)
+
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        node = next(n for n in store.all_nodes(session, run) if n.node_id.startswith("escalate:"))
+        assert store.get_node(session, run, "build").status is NodeStatus.ERRORED
+
+    output = invoke(cli, workspace, "approve", run_id, node.node_id, "--by", "ops", "--no-resume")
+
+    assert "re-entering" in output           # rich colours the node id mid-word
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "build").status is NodeStatus.PENDING

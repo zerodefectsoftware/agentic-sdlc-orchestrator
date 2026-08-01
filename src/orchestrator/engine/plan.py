@@ -175,6 +175,7 @@ class NodeTemplate(BaseModel):
     model_config = _STRICT
     kind: NodeKind
     role: str | None = None
+    inputs: list[str] = Field(default_factory=list)   # a child has no `needs` to inherit from
     verify: list[str] = Field(default_factory=list)
     write_scope: list[str] = Field(default_factory=list)
     freeze_paths: list[str] = Field(default_factory=list)

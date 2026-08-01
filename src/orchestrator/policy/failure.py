@@ -63,7 +63,9 @@ def respond_to(verdict: Verdict, node: Node, *, attempt: int) -> Response:
     return _respond_to_failure(node, attempt)
 
 
-def escalation_node(node: Node, response: Response, *, attempt: int) -> Node:
+def escalation_node(
+    node: Node, response: Response, *, attempt: int, verdict: object = "fail"
+) -> Node:
     """Build the `human` node an escalation inserts.
 
     §3 says nothing executes outside the graph, and a run that silently parks in
@@ -76,10 +78,22 @@ def escalation_node(node: Node, response: Response, *, attempt: int) -> Node:
     that phase. Metrics that group by stage should attribute the handoff to
     verification, not to a category of its own.
 
-    The decision means: **approve** — the human accepts the state and the run
-    proceeds past the failed node; **reject** — the run stops. For a node whose
-    `may_waive` is false (D15), this is the only route by which the finding can
-    be waived at all, and it is a human doing it.
+    What **approve** means depends on why the run escalated, which is why the
+    verdict travels with the node:
+
+    - after an ERROR, the check could not be performed — a harness problem. The
+      human fixes the harness and approval **re-enters the node**, because the
+      work was never judged.
+    - after a FAIL, the work was judged and found wanting past its budget.
+      Approval **waives past it**: the human accepts the state and the run
+      proceeds. For a node whose `may_waive` is false (D15) this is the only
+      route to a waiver, and it is a person taking it.
+
+    Without that distinction approval does neither: the escalated node stays in
+    its terminal failure, nothing downstream can ever be satisfied, and a run
+    that a human has just attended to deadlocks anyway.
+
+    **reject** stops the run in both cases.
     """
     return Node(
         id=f"{ESCALATION_PREFIX}:{node.id}#{attempt}",
@@ -89,6 +103,7 @@ def escalation_node(node: Node, response: Response, *, attempt: int) -> Node:
         needs=[node.id],
         optional=True,  # materialised only when something escalates to it
         presents=[f"{node.id}.gate_record", *node.outputs],
+        params={"escalated_node": node.id, "escalated_for": str(verdict)},
     )
 
 

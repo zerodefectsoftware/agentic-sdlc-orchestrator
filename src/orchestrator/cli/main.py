@@ -214,6 +214,36 @@ def run(
     _show(run_id)
 
 
+def _release_escalation(session, run, execution) -> None:
+    """Put the escalated node back in play, according to why it escalated.
+
+    Approving the checkpoint has to do something to the node it was raised for,
+    or the run deadlocks the moment a human attends to it: the escalated node
+    sits in its terminal failure and nothing downstream is ever satisfiable.
+
+    After an ERROR the check could not be performed — the operator fixed the
+    harness, so the node is re-entered and judged properly this time. After a
+    FAIL the work was judged; approval is the human waiving past it (D15), so it
+    is marked skipped and the graph moves on without pretending it passed.
+    """
+    params = (execution.config or {}).get("params") or {}
+    escalated = params.get("escalated_node")
+    if not escalated:
+        return
+
+    source = store.get_node(session, run, escalated)
+    if source is None:
+        return
+
+    if params.get("escalated_for") == "error":
+        source.status = NodeStatus.PENDING
+        console.print(f"  [dim]re-entering[/dim] {escalated} — the check can now be performed")
+    else:
+        source.status = NodeStatus.SKIPPED
+        console.print(f"  [dim]waived past[/dim] {escalated} by {run.approvals[-1].decided_by}")
+    session.flush()
+
+
 def _profile(path: Path) -> TargetProfile:
     """Load the target profile, or stop with a message rather than a traceback."""
     try:
@@ -372,6 +402,7 @@ def _decide(
             target.status = RunStatus.RUNNING
             target.stop_reason = None
             console.print(f"[green]approved[/green] {node_id} by {by}")
+            _release_escalation(session, target, execution)
         else:
             execution.status = NodeStatus.FAILED
             store.finish_run(

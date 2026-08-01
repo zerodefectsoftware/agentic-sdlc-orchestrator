@@ -369,6 +369,10 @@ class Scheduler:
                 role=template.role,
                 write_scope=[_substitute(scope, item) for scope in template.write_scope],
                 verify=[_substitute(check, item) for check in template.verify],
+                # Children have no `needs`, so without this an implementer is
+                # handed the raw requirement and nothing else — not the design
+                # it is implementing, nor the tests it has to satisfy.
+                inputs=list(template.inputs),
                 freeze_paths=list(template.freeze_paths),
                 gate=template.gate,
                 model=template.model,
@@ -468,7 +472,7 @@ class Scheduler:
             case Action.INSERT_FIX:
                 self._insert_repair(session, run, node, execution)
             case Action.ESCALATE:
-                self._insert_escalation(session, run, node, response, attempt_number)
+                self._insert_escalation(session, run, node, response, attempt_number, verdict)
             case Action.SAFE_STOP:
                 store.finish_run(session, run, status=RunStatus.STOPPED,
                                  stop_reason=response.reason)
@@ -556,10 +560,18 @@ class Scheduler:
         session.flush()
 
     def _insert_escalation(
-        self, session: Session, run: Run, node: Node, response, attempt_number: int
+        self,
+        session: Session,
+        run: Run,
+        node: Node,
+        response,
+        attempt_number: int,
+        verdict: Verdict,
     ) -> None:
         """Hand off to a human as a node, not a status (§6)."""
-        escalation = escalation_node(node, response, attempt=attempt_number)
+        escalation = escalation_node(
+            node, response, attempt=attempt_number, verdict=verdict
+        )
         self._runtime[escalation.id] = escalation
 
         store.insert_node(

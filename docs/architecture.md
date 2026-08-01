@@ -907,6 +907,8 @@ nodes:
     kind: derive                      # deterministic generation (D8), no model call
     stage: implementation
     needs: [design-approval]
+    inputs: [design.artifacts.spec]   # design-approval is a human node: it
+                                      # produces no artifact to inherit
     run: py:orchestrator.derive.scaffold_from_design
     params:
       root: "{target.root}"
@@ -926,7 +928,7 @@ nodes:
     role: test-author                 # deliberately NOT the implementer (D5)
     outputs: [suite]                  # gates read tests-acceptance.suite
     needs: [scaffold]
-    inputs: [intake.artifacts.register]
+    inputs: [intake.artifacts.register, design.artifacts.spec]
     write_scope: ["{target.tests_root}/**"]
     verify:
       - "sh:{target.commands.test}"   # a code agent cannot report its own red
@@ -943,6 +945,7 @@ nodes:
     template:
       kind: codeagent
       role: implementer
+      inputs: [design.artifacts.spec, intake.artifacts.register]
       write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
       verify:
         - "sh:{target.commands.lint_path} {target.root}/{item.path}"
@@ -981,6 +984,7 @@ nodes:
     role: technical-writer
     outputs: [readme]                 # gates read docs.readme
     needs: [impl]
+    inputs: [design.artifacts.spec, intake.artifacts.register]
     effort: medium
     write_scope: ["target/README.md", "target/docs/**"]
     gate:                             # G8 — executable documentation
