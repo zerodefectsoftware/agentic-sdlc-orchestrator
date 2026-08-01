@@ -97,6 +97,31 @@ scripts** — plus the governance that becomes necessary once jobs stop being de
 | Re-run failed jobs | Bounded retries |
 | Run history / artifacts | Audit trail + evidence bundle |
 
+### 2.1 What we build vs what we buy (D17)
+
+"Hand-rolled orchestrator" describes one layer, not the whole system. The principle is
+**build what's graded, buy what isn't** — §4.4 is a list of control-plane properties, so
+that is what we write; everything else is a dependency.
+
+| Capability | Provider | Ours? |
+| --- | --- | --- |
+| Agent loop, file/bash tools, permissions, subagents, sessions | Claude Agent SDK | bought |
+| Schema-constrained artifact generation | Anthropic SDK + Pydantic | bought |
+| Graph algorithms — topological order, cycle detection, transitive descendants | networkx | bought |
+| Test execution, linting (the gate evaluators) | pytest, ruff | bought |
+| API/schema definitions, OpenAPI generation | FastAPI + Pydantic | bought |
+| Persistence for run state, lineage, audit | SQLAlchemy + SQLite | bought |
+| Plan parsing, artifact validation | PyYAML, jsonschema | bought |
+| CLI, human approval prompts | Typer, rich | bought |
+| **Scheduler, gates, policy, lineage, invalidation, re-planning, metrics** | — | **ours** |
+
+The last row is roughly **1,200–1,500 lines**. Everything above it is imported, and each
+dependency displaces work that would otherwise be done worse and score nothing.
+
+Invalidation illustrates the line: marking every transitively dependent artifact stale is
+`networkx.descendants()`. The *semantics* of what invalidation means — which approvals
+revert, which gates re-open — is ours, because that is the governed behaviour being graded.
+
 Two things break when workers are models, and those breakages are the whole design:
 
 1. **Self-reports are unreliable.** A script exiting 0 succeeded; an agent saying
@@ -139,15 +164,38 @@ Nothing executes outside the graph; plenty exists outside it.
 ```
 Node
   id, stage
+  kind          one of the seven node kinds (§4.7)
   inputs        artifact refs it consumes
-  worker        agent role | tool | human
+  worker        resolved from kind + config
   outputs       artifact refs it must produce (schema-constrained)
   entry_gate    preconditions
   exit_gate     acceptance predicate, evaluated by a non-producer
   autonomy      AUTO | REVIEW | APPROVE | FORBIDDEN
   retry_budget  int
   write_scope   paths this node may modify
+  model         model id (model-backed kinds only)
+  effort        low | medium | high — reasoning depth for this node
 ```
+
+`model` and `effort` are per-node because nodes differ enormously in how much reasoning they
+justify: structured extraction in `intake` does not need the depth that `design` or `impl`
+does. Putting them in the plan file makes **cost and latency a property of the configuration
+rather than of the code** — tunable per node, visible in one place, and adjustable without
+touching the engine.
+
+```yaml
+- id: intake
+  kind: agent
+  model: claude-opus-5
+  effort: medium          # structured extraction — depth adds little
+- id: design
+  kind: agent
+  model: claude-opus-5
+  effort: high            # architectural judgment — depth pays
+```
+
+The same lever bounds a runaway repair loop: a retry can re-run at higher effort rather than
+simply re-rolling the same dice (§6).
 
 ### 4.2 Gates
 
@@ -211,6 +259,94 @@ target:
   lint_cmd: .venv/bin/ruff check
   language: python
 ```
+
+### 4.7 The plan is data, not code (D16)
+
+The engine implements a small fixed set of **node kinds**; the plan graph is a YAML
+document that composes them. Adding a stage is an edit to data, not to the scheduler.
+
+| Kind | Worker | Determinism |
+| --- | --- | --- |
+| `agent` | Model call with a role prompt and an enforced output schema | Non-deterministic |
+| `codeagent` | Coding-agent session, write-scoped to declared paths | Non-deterministic |
+| `tool` | Command execution; exit code and output are the result | Deterministic |
+| `derive` | Generation from a contract (models from OpenAPI, docs from schema) | Deterministic |
+| `human` | Approval or clarification checkpoint | Authoritative |
+| `fanout` | Materializes N children from an upstream artifact | Structural |
+| `join` | Synchronization barrier | Structural |
+
+Seven kinds cover the entire greenfield graph. The brownfield additions —
+`impact-analysis`, `baseline-capture` — introduce **no new kinds**; they are new YAML
+entries composing existing ones. That is the test of whether the factoring is right.
+
+```yaml
+- id: impl
+  kind: fanout
+  from: design.artifacts.modules          # runtime path into an upstream artifact
+  template:
+    kind: codeagent
+    write_scope: "src/shortener/{item.path}"
+    retry_budget: 2
+  gate:
+    all: ["ruff.exit_code == 0", "pytest.exit_code == 0"]
+```
+
+**The boundary, held deliberately:** *data describes structure; code provides node kinds
+and gate predicates.* Gate expressions are a deliberately tiny expression language with an
+escape hatch to a registered predicate function. Pushing further — conditionals, loops,
+variables in YAML — reinvents a programming language badly. The line is drawn where it is
+because it can be defended, not because the DSL ran out of features.
+
+**Why this factoring is the design's main asset:** the plan graph is the part most likely
+to change under requirements nobody anticipated. Keeping it declarative means unforeseen
+extensions — a compliance-review stage, a performance-budget gate, a second target
+language — arrive as configuration against an unchanged, already-tested engine. The
+engine's surface stays small enough to reason about precisely because the interesting
+variation lives outside it.
+
+It also makes the system legible: a reviewer can read the SDLC directly out of one file,
+rather than inferring it from control flow.
+
+### 4.8 The Worker interface (D18)
+
+Every node kind resolves to a **worker**, and all workers implement one interface:
+
+```
+Worker.run(node, inputs, scope) -> artifacts
+```
+
+`scope` carries the write permissions from §4.4. Nothing else in the engine knows whether
+the work behind it was a model call, a subprocess, or a human.
+
+This single seam does three jobs:
+
+**1. It makes the engine testable.** The hard question for a system like this is *how do you
+unit-test a scheduler whose workers are non-deterministic?* The answer is that the engine's
+tests never call a model. Worker outputs are recorded once, then replayed — so gate
+evaluation, invalidation cascades, retry budgets, rollback, stale-approval detection, and
+the security→design re-plan are all covered by fast, deterministic tests.
+
+**2. It makes runs reproducible.** A `replay` worker serves recorded artifacts, so a
+scenario can be re-run identically — for a demo, for debugging, or to isolate an engine bug
+from a model-behaviour change.
+
+**3. It isolates the runtime choice.** Swapping a node's worker (D17) is a config change,
+not a refactor.
+
+Three worker implementations:
+
+| Worker | Backs | Used in |
+| --- | --- | --- |
+| `LiveWorker` | Real model calls and subprocesses | Real runs |
+| `ReplayWorker` | Recorded artifacts, keyed by node + input hash | Engine tests, demos |
+| `StubWorker` | Fixed responses, including forced failures | Testing retry, rollback, safe-stop |
+
+`StubWorker` is what makes the failure paths testable at all: a rollback that has never been
+exercised is a claim, not a control.
+
+The interface must be designed in from the start. Retrofitting it once model calls are
+scattered through node implementations is painful, and the cost of adding it up front is
+close to zero.
 
 ---
 
@@ -433,7 +569,10 @@ claimed.
 
 | ID | Decision | Rationale | Cost accepted |
 | --- | --- | --- | --- |
-| **D1** | No agent framework (LangGraph/CrewAI); hand-rolled DAG engine over `asyncio` | Orchestration is the graded artifact; a framework supplies ~40% (state, checkpointing, interrupts) but obscures which design is ours. Gates, policy, lineage, invalidation — the other 60% — must be built regardless | We own the scheduler and its bugs |
+| **D1** | No orchestration framework; hand-rolled engine over `asyncio`. Alternatives evaluated below | Orchestration is the graded artifact; a framework supplies ~40% (state, checkpointing, interrupts) but obscures which design is ours. Gates, policy, lineage, invalidation — the other 60% — must be built regardless | We own the scheduler and its bugs |
+| **D16** | The plan graph is declarative YAML over seven node kinds (§4.7); the engine is fixed | Extension without engine change — new stages, gates, and scenarios are configuration. Keeps the engine small and makes the SDLC readable from one file | A declarative DSL has an expressiveness ceiling; dynamic fan-out needs an explicit construct |
+| **D17** | **Build what's graded, buy what isn't.** Hand-roll the control plane; use existing libraries for worker runtimes, agent harnesses, and every non-graded capability | §4.4 is a list of control-plane properties — that is the differentiator. Reimplementing file/bash tooling, permission layers, and agent loops is a week of undifferentiated work that would consume the time the graded part needs | A dependency on the agent harness's permission model; D6/D7 enforcement is only as good as what it exposes |
+| **D18** | One `Worker` interface behind every node kind, with live / replay / stub implementations | The only way to test a scheduler whose workers are non-deterministic; also makes runs reproducible and the runtime choice swappable (§4.8) | Recorded fixtures drift from real model behaviour and need periodic refresh |
 | **D2** | SQLite backs orchestration state, not just target data | Safe-stop resumability and reliability metrics need durable, queryable run state | Single-node only |
 | **D3** | `orchestrator` never imports `shortener`; target specifics in a config profile | Makes generality checkable rather than claimed | Some indirection |
 | **D4** | Exit gates evaluated by a non-producer, preferably a real tool | Agent self-reports are assertions, not evidence | Gates limited to machine-checkable properties |
@@ -449,6 +588,16 @@ claimed.
 | **D14** | Documentation gate executes the setup instructions in a clean environment | Doc gates that check for headings are vacuous | Slower gate; needs an isolated env |
 | **D15** | Agents may not waive security findings | Segregation of duties | Every HIGH finding costs human time |
 
+### Alternatives evaluated for D1
+
+| Option | What it supplies | Why not |
+| --- | --- | --- |
+| LangGraph | Typed state, checkpointing, `interrupt` for human-in-loop, conditional routing | ~40% of §4.4, but a reviewer cannot tell which design is ours — the weakest sentence in a defense of the graded differentiator |
+| CrewAI | Role-based agent teams | Abstraction is agents-with-roles, not artifacts-through-gates. Poorest fit |
+| n8n | Visual workflow engine, JSON-defined graphs | Legitimate category; deliverable becomes a workflow export, which reads as integration rather than engineering. No gates-as-predicates, no lineage, no version-bound approvals |
+| GitHub Actions | DAG, required checks, environment approvals, audit history, retries | Closest existing analogue — and the reason the Actions mapping in §2 is a specification rather than a metaphor. Fails on the two hardest requirements: workflows are static, so no runtime fan-out and no re-planning |
+| Temporal | Durable execution — safe-stop, resume, retries done properly | The correct production answer for the failure-control layer; too heavy to stand up in the available time |
+
 ---
 
 ## 10. Risks, trade-offs, limitations
@@ -457,7 +606,7 @@ claimed.
 
 | Risk | Mitigation |
 | --- | --- |
-| **Non-deterministic workers** make runs irreproducible | Deterministic gates; recorded artifacts; replayable runs from persisted state. Model version captured in lineage |
+| **Non-deterministic workers** make runs irreproducible | The `Worker` seam (§4.8): recorded fixtures replay a run identically, and engine tests never call a model. Deterministic gates; model version captured in lineage |
 | **Prompt injection** via requirement text or target file contents | Agents receive scoped read access; generated code is never executed outside the test sandbox; policy evaluation never consults model output |
 | **Arbitrary code execution** — running agent-written tests is executing untrusted code | Subprocess isolation in a dedicated venv. Container isolation is the correct answer and is not implemented |
 | **Gate quality ceiling** — the system is only as good as its checkable predicates | Subjective quality (design taste, naming, maintainability) is not gateable and is deliberately routed to human approval |
@@ -489,18 +638,22 @@ claimed.
 
 ## 11. Coverage of brief §4.4
 
-| Required capability | Mechanism | Demonstrated by |
-| --- | --- | --- |
-| Explicit dependency graph, entry/exit gates | §3, §4.1–4.2 | All |
-| Sequential + parallel with synchronization | impl fan-out; tests ∥ docs ∥ security | Greenfield |
-| Cross-stage context and decision lineage | §4.5 lineage graph | All; cross-run in brownfield |
-| Human approval checkpoints | §4.3 policy; design + accept gates | All |
-| Bounded retries | §6 | Greenfield, brownfield |
-| Fallback | §6 | Greenfield |
-| Rollback | baseline-capture + restore | **Brownfield** |
-| Safe-stop | §6; red-baseline refusal | **Brownfield** |
-| Policy guardrails (security, compliance, change control) | §4.3, §4.4, D15, breaking-change approval | Brownfield, greenfield |
-| Audit-grade observability | §8, evidence bundle | All |
-| Reliability metrics | §8 | All |
-| Dynamic re-planning | §6 invalidation | **Ambiguous** (human revision), **greenfield** (G9 → design) |
-| Controlled autonomy | §4.3, D13 | **Ambiguous** |
+| Required capability | Mechanism | Built or bought | Demonstrated by |
+| --- | --- | --- | --- |
+| Explicit dependency graph, entry/exit gates | §3, §4.1–4.2, §4.7 | **ours** (graph algorithms: networkx) | All |
+| Sequential + parallel with synchronization | impl fan-out; tests ∥ docs ∥ security | **ours** (concurrency: `asyncio`) | Greenfield |
+| Cross-stage context and decision lineage | §4.5 lineage graph | **ours** (storage: SQLAlchemy) | All; cross-run in brownfield |
+| Human approval checkpoints | §4.3 policy; design + accept gates | **ours** (prompt UI: Typer/rich) | All |
+| Bounded retries | §6 | **ours** | Greenfield, brownfield |
+| Fallback | §6 | **ours** | Greenfield |
+| Rollback | baseline-capture + restore | **ours** (tree snapshot: `git`) | **Brownfield** |
+| Safe-stop | §6; red-baseline refusal | **ours** (durable state: SQLite) | **Brownfield** |
+| Policy guardrails (security, compliance, change control) | §4.3, §4.4, D15, breaking-change approval | **ours**; write-scope *enforcement* from the Agent SDK permission layer | Brownfield, greenfield |
+| Audit-grade observability | §8, evidence bundle | **ours** | All |
+| Reliability metrics | §8 | **ours** | All |
+| Dynamic re-planning | §6 invalidation | **ours** (descendant computation: networkx) | **Ambiguous** (human revision), **greenfield** (G9 → design) |
+| Controlled autonomy | §4.3, D13 | **ours** | **Ambiguous** |
+
+Every §4.4 capability is ours. Dependencies supply mechanism — graph maths, storage,
+concurrency, a permission primitive — never the governed behaviour itself. That is the
+build/buy line (§2.1) applied to the graded requirements one by one.

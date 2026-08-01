@@ -131,7 +131,7 @@ Three populations, deliberately different in what they prove:
 
 | Layer | Author | Weight |
 | --- | --- | --- |
-| Orchestrator unit tests | human-authored | The engine must be trustworthy; it is not agent-written |
+| Orchestrator unit tests | human-authored, run against **recorded worker fixtures** | The engine must be trustworthy; it is not agent-written. Because every worker sits behind one interface, these tests never call a model — gates, invalidation, retries, and rollback are all deterministic |
 | Target acceptance tests | agent, from acceptance criteria, pre-implementation | **The gate.** Must go red → green |
 | Target regression tests | inherited from prior runs | Must stay green → green |
 
