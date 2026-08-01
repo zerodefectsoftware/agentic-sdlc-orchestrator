@@ -40,6 +40,7 @@ from orchestrator.gates.registry import registry as default_registry
 from orchestrator.lineage import recorder
 from orchestrator.policy.failure import Action, escalation_node, respond_to
 from orchestrator.state import store
+from orchestrator.state.artifacts import ArtifactStore
 from orchestrator.state.models import Artifact, NodeStatus, Run, RunStatus
 from orchestrator.workers.base import Worker, WorkerError, WorkerResult, WorkScope
 
@@ -71,15 +72,18 @@ class Scheduler:
         worker: Worker,
         *,
         registry: PredicateRegistry | None = None,
+        artifacts: ArtifactStore | None = None,
         max_workers: int = 4,
     ) -> None:
         self.plan = plan
         self.worker = worker
         self.registry = registry if registry is not None else default_registry
+        self.artifacts = artifacts if artifacts is not None else ArtifactStore()
         self.max_workers = max_workers
         self._graph = dependency_graph(plan)
         self._runtime: dict[str, Node] = {}       # nodes materialised during the run
         self._extra_needs: dict[str, list[str]] = {}  # edges added at runtime
+        self._materialised: set[str] = set()          # fanouts already expanded
 
     # ----------------------------------------------------------------- #
     # lifecycle
@@ -161,8 +165,9 @@ class Scheduler:
             return list(pool.map(self._execute_one, wave))
 
     def _execute_one(self, node: Node) -> Outcome:
-        if node.kind is NodeKind.HUMAN:
-            return Outcome(node=node)  # nothing to dispatch; it blocks on a person
+        if node.kind in (NodeKind.HUMAN, NodeKind.FANOUT):
+            # Neither does work: one blocks on a person, the other shapes the graph.
+            return Outcome(node=node)
 
         try:
             result = self.worker.run(node, {}, WorkScope.for_node(node))
@@ -184,6 +189,10 @@ class Scheduler:
             self._block_for_human(session, run, node, execution)
             return
 
+        if node.kind is NodeKind.FANOUT:
+            self._expand(session, run, node, execution)
+            return
+
         attempt = store.begin_attempt(
             session,
             execution,
@@ -194,17 +203,7 @@ class Scheduler:
 
         produced: list[Artifact] = []
         if outcome.result:
-            produced = [
-                recorder.record_artifact(
-                    session,
-                    run,
-                    name=artifact.name,
-                    content=artifact.content,
-                    produced_by=attempt,
-                    path=artifact.path,
-                )
-                for artifact in outcome.result.artifacts
-            ]
+            produced = [self._store(session, run, attempt, a) for a in outcome.result.artifacts]
 
         verdict, gate_result = self._evaluate(node, outcome)
         if gate_result is not None:
@@ -237,6 +236,72 @@ class Scheduler:
         self._apply_policy(
             session, run, node, execution, verdict, attempt.number, outcome.facts
         )
+
+    def _store(self, session: Session, run: Run, attempt, produced) -> Artifact:
+        """Record an artifact's identity, and write its body where it can be read."""
+        artifact = recorder.record_artifact(
+            session, run, name=produced.name, content=produced.content, produced_by=attempt
+        )
+        path = self.artifacts.write(run.id, artifact.name, artifact.version, produced.content)
+        artifact.path = str(path)
+        session.flush()
+        return artifact
+
+    # ----------------------------------------------------------------- #
+    # fanout
+    # ----------------------------------------------------------------- #
+
+    def _expand(self, session: Session, run: Run, node: Node, execution) -> None:
+        """Materialise a fanout's children from an upstream artifact (§5.1).
+
+        Runs in two passes. The first reads the source artifact, creates the
+        children, and makes the fanout node wait for them. The second — once the
+        children have passed — marks the fanout done.
+
+        Waiting matters: downstream nodes say `needs: [impl]`, and if the fanout
+        completed the moment it materialised, verification would start before a
+        single module had been written.
+        """
+        if node.id in self._materialised:
+            execution.status = NodeStatus.PASSED
+            session.flush()
+            return
+
+        for child in self._children_of(session, run, node):
+            self._runtime[child.id] = child
+            if store.get_node(session, run, child.id) is None:
+                store.insert_node(session, run, child.id, str(child.kind), str(child.stage))
+            self._extra_needs.setdefault(node.id, []).append(child.id)
+
+        self._materialised.add(node.id)
+        execution.status = NodeStatus.PENDING  # re-enters once its children pass
+        session.flush()
+
+    def _children_of(self, session: Session, run: Run, node: Node) -> list[Node]:
+        source = recorder.latest(session, run, _artifact_name(node.from_ or ""))
+        if source is None:
+            raise SchedulerError(
+                f"fanout '{node.id}' reads '{node.from_}', which no node has produced"
+            )
+
+        items = parse_fanout_items(self.artifacts.read(source), source.ref)
+        template = node.template
+        return [
+            Node(
+                id=f"{node.id}:{item.get('name', index)}",
+                kind=template.kind,
+                stage=node.stage,           # the children are the same phase of work
+                role=template.role,
+                write_scope=[_substitute(scope, item) for scope in template.write_scope],
+                freeze_paths=list(template.freeze_paths),
+                gate=template.gate,
+                model=template.model,
+                effort=template.effort,
+                retry_budget=template.retry_budget,
+                autonomy=template.autonomy,
+            )
+            for index, item in enumerate(items)
+        ]
 
     def _evaluate(self, node: Node, outcome: Outcome) -> tuple[Verdict, GateResult | None]:
         """A node without a gate is accepted on completion; with one, the gate decides."""
@@ -422,6 +487,18 @@ def _status_for(verdict: Verdict) -> NodeStatus:
         Verdict.FAIL: NodeStatus.FAILED,
         Verdict.ERROR: NodeStatus.ERRORED,
     }[verdict]
+
+
+def _substitute(pattern: str, item: dict) -> str:
+    """`target/shortener/{item.path}/**` → `target/shortener/api/**`.
+
+    Deliberately narrow: only `{item.key}` is substituted, so a plan cannot
+    smuggle arbitrary formatting into a write scope — the one field where a
+    surprise would defeat blast-radius containment (D7).
+    """
+    for key, value in item.items():
+        pattern = pattern.replace(f"{{item.{key}}}", str(value))
+    return pattern
 
 
 def _artifact_name(ref: str) -> str:

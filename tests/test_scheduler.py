@@ -14,12 +14,14 @@ from pathlib import Path
 import pytest
 
 from orchestrator.engine.loader import load_plan
+from orchestrator.engine.plan import Stage
 from orchestrator.engine.scheduler import Scheduler, SchedulerError, parse_fanout_items
 from orchestrator.gates.registry import PredicateRegistry
 from orchestrator.lineage import query, recorder
 from orchestrator.state import store
+from orchestrator.state.artifacts import ArtifactStore
 from orchestrator.state.models import Decision, NodeStatus, RunStatus
-from orchestrator.workers import StubWorker, WorkerError
+from orchestrator.workers import StubWorker, WorkerError, WorkScope
 from orchestrator.workers import stub as scripts
 
 LINEAR = """
@@ -371,6 +373,152 @@ def test_re_deriving_an_artifact_marks_descendants_stale(session, tmp_path):
 
     scheduler._invalidate_downstream(session, run, build)
     assert statuses(session, run)["verify"] is NodeStatus.STALE
+
+
+# --------------------------------------------------------------------------- #
+# fanout
+# --------------------------------------------------------------------------- #
+
+FANOUT = """
+plan: t
+version: 1
+nodes:
+  - id: design
+    kind: agent
+    stage: design
+    role: architect
+    outputs: [modules]
+  - id: impl
+    kind: fanout
+    stage: implementation
+    needs: [design]
+    from: design.artifacts.modules
+    template:
+      kind: codeagent
+      role: implementer
+      write_scope: ["target/shortener/{item.path}/**"]
+  - id: tests
+    kind: tool
+    stage: verification
+    needs: [impl]
+    run: sh:pytest
+"""
+
+MODULES = '[{"name": "api", "path": "api"}, {"name": "storage", "path": "storage"}]'
+
+
+@pytest.fixture
+def fanout_worker():
+    return StubWorker(
+        {"design": scripts.passing("agent", **{"design.modules": MODULES})},
+        default=scripts.passing("pytest"),
+    )
+
+
+def fanout_scheduler(plan, worker, tmp_path):
+    return Scheduler(plan, worker, artifacts=ArtifactStore(tmp_path / "runs"))
+
+
+def test_fanout_materialises_one_child_per_item(session, tmp_path, fanout_worker):
+    """§5.1: the graph's shape depends on an upstream agent's output."""
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    run = scheduler.advance(
+        session, scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+    )
+
+    assert run.status is RunStatus.COMPLETED
+    children = [n.node_id for n in store.all_nodes(session, run) if n.node_id.startswith("impl:")]
+    assert children == ["impl:api", "impl:storage"]
+    assert all(store.get_node(session, run, child).inserted for child in children)
+
+
+def test_verification_waits_for_every_module(session, tmp_path, fanout_worker):
+    """If the fanout completed the moment it materialised, verification would
+    start before a single module had been written."""
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    scheduler.advance(
+        session, scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+    )
+
+    calls = fanout_worker.calls
+    assert calls.index("impl:api") < calls.index("tests")
+    assert calls.index("impl:storage") < calls.index("tests")
+
+
+def test_children_run_in_the_same_wave(session, tmp_path, fanout_worker):
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    scheduler.advance(
+        session, scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+    )
+    calls = fanout_worker.calls
+    assert set(calls[1:3]) == {"impl:api", "impl:storage"}
+
+
+def test_each_child_is_scoped_to_its_own_module(session, tmp_path, fanout_worker):
+    """D7: a module that could write its neighbour's directory has no blast radius."""
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    scheduler.advance(
+        session, scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+    )
+
+    api = scheduler._runtime["impl:api"]
+    storage = scheduler._runtime["impl:storage"]
+    assert api.write_scope == ["target/shortener/api/**"]
+    assert storage.write_scope == ["target/shortener/storage/**"]
+    assert not WorkScope.for_node(api).permits("target/shortener/storage/db.py")
+
+
+def test_children_inherit_the_stage_of_the_fanout(session, tmp_path, fanout_worker):
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    scheduler.advance(
+        session, scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+    )
+    assert scheduler._runtime["impl:api"].stage is Stage.IMPLEMENTATION
+
+
+def test_a_fanout_whose_source_was_never_produced_fails_loudly(session, tmp_path):
+    worker = StubWorker(default=scripts.passing("agent"))  # design produces nothing
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, worker, tmp_path)
+
+    with pytest.raises(SchedulerError, match="which no node has produced"):
+        scheduler.advance(
+            session, scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+        )
+
+
+def test_artifact_bodies_are_written_where_they_can_be_read(session, tmp_path, fanout_worker):
+    """A reviewer should be able to `cat` an artifact, not query for a hash."""
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    run = scheduler.advance(
+        session, scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+    )
+
+    modules = recorder.latest(session, run, "design.modules")
+    assert Path(modules.path).read_text() == MODULES
+    assert Path(modules.path).name == "v1"
+
+
+def test_a_missing_artifact_body_is_an_error(session, tmp_path):
+    """Silently reading '' would produce a fanout with zero children."""
+    artifacts = ArtifactStore(tmp_path / "runs")
+    run = store.start_run(
+        session,
+        plan_name="t",
+        plan_version=1,
+        requirement_path="r.md",
+        target_profile="t.yaml",
+        nodes=[("a", "tool", "verification")],
+    )
+    orphan = recorder.record_artifact(session, run, name="ghost", content="x")
+    with pytest.raises(FileNotFoundError, match="body is missing"):
+        artifacts.read(orphan)
 
 
 # --------------------------------------------------------------------------- #
