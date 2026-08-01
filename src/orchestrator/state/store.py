@@ -14,6 +14,7 @@ from pathlib import Path
 from sqlalchemy import Engine, create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from orchestrator.config import get_settings
 from orchestrator.state.models import (
     Attempt,
     Base,
@@ -29,7 +30,8 @@ from orchestrator.state.models import (
 class Store:
     """Owns the database connection and hands out sessions."""
 
-    def __init__(self, url: str = "sqlite:///runs/orchestrator.db") -> None:
+    def __init__(self, url: str | None = None) -> None:
+        url = url or get_settings().database_url
         if url.startswith("sqlite:///") and ":memory:" not in url:
             Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
         self.engine: Engine = create_engine(url, future=True)

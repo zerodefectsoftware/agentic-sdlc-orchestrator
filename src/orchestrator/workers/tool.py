@@ -17,6 +17,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from orchestrator.config import get_settings
 from orchestrator.engine.plan import Node, RunScheme
 from orchestrator.gates.facts import Fact, FactSet, FactSource
 from orchestrator.workers.base import WorkerError, WorkerResult, WorkScope
@@ -29,9 +30,9 @@ class ToolWorker:
 
     name = "tool"
 
-    def __init__(self, *, cwd: Path | str = ".", timeout: int = 600) -> None:
+    def __init__(self, *, cwd: Path | str = ".", timeout: int | None = None) -> None:
         self.cwd = Path(cwd)
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else get_settings().tool_timeout
 
     def run(self, node: Node, inputs: FactSet, scope: WorkScope) -> WorkerResult:
         if node.run is None or node.run_scheme is not RunScheme.SH:

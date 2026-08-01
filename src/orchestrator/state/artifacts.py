@@ -19,12 +19,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from orchestrator.config import get_settings
 from orchestrator.state.models import Artifact
 
 
 class ArtifactStore:
-    def __init__(self, root: Path | str = "runs") -> None:
-        self.root = Path(root)
+    def __init__(self, root: Path | str | None = None) -> None:
+        self.root = Path(root) if root is not None else get_settings().runs_dir
 
     def path_for(self, run_id: str, name: str, version: int) -> Path:
         return self.root / run_id / "artifacts" / name / f"v{version}"

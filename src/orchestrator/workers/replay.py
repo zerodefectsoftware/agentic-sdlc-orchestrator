@@ -18,6 +18,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from orchestrator.config import get_settings
 from orchestrator.engine.plan import Node
 from orchestrator.gates.facts import Fact, FactSet, FactSource
 from orchestrator.workers.base import (
@@ -46,8 +47,10 @@ class ReplayWorker:
 
     name = "replay"
 
-    def __init__(self, fixtures_dir: Path | str = "fixtures") -> None:
-        self.fixtures_dir = Path(fixtures_dir)
+    def __init__(self, fixtures_dir: Path | str | None = None) -> None:
+        self.fixtures_dir = (
+            Path(fixtures_dir) if fixtures_dir is not None else get_settings().fixtures_dir
+        )
 
     def run(self, node: Node, inputs: FactSet, scope: WorkScope) -> WorkerResult:
         path = self.path_for(node, inputs)
@@ -70,9 +73,11 @@ class RecordingWorker:
     later run can replay it.
     """
 
-    def __init__(self, inner: Worker, fixtures_dir: Path | str = "fixtures") -> None:
+    def __init__(self, inner: Worker, fixtures_dir: Path | str | None = None) -> None:
         self.inner = inner
-        self.fixtures_dir = Path(fixtures_dir)
+        self.fixtures_dir = (
+            Path(fixtures_dir) if fixtures_dir is not None else get_settings().fixtures_dir
+        )
         self.name = f"recording:{inner.name}"
 
     def run(self, node: Node, inputs: FactSet, scope: WorkScope) -> WorkerResult:

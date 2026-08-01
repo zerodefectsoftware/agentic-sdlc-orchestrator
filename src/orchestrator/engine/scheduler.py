@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import networkx as nx
 from sqlalchemy.orm import Session
 
+from orchestrator.config import get_settings
 from orchestrator.engine.loader import dependency_graph
 from orchestrator.engine.plan import Gate, Node, NodeKind, Plan
 from orchestrator.gates import GateResult, Verdict, evaluate_gate
@@ -73,13 +74,13 @@ class Scheduler:
         *,
         registry: PredicateRegistry | None = None,
         artifacts: ArtifactStore | None = None,
-        max_workers: int = 4,
+        max_workers: int | None = None,
     ) -> None:
         self.plan = plan
         self.worker = worker
         self.registry = registry if registry is not None else default_registry
         self.artifacts = artifacts if artifacts is not None else ArtifactStore()
-        self.max_workers = max_workers
+        self.max_workers = max_workers if max_workers is not None else get_settings().max_workers
         self._graph = dependency_graph(plan)
         self._runtime: dict[str, Node] = {}       # nodes materialised during the run
         self._extra_needs: dict[str, list[str]] = {}  # edges added at runtime
