@@ -1,5 +1,5 @@
 [project]
-name = "cschwab-agentic-sdlc"
+name = "agentic-sdlc-orchestrator"
 version = "0.1.0"
 description = "Agentic SDLC orchestrator, demonstrated by building a URL shortener"
 requires-python = ">=3.13"
