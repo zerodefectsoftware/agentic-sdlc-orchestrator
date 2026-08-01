@@ -13,12 +13,56 @@ criteria have no test: AC1.2, AC3.1, AC4.4" is worth far more than `False`.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from orchestrator.gates.facts import FactSet
 
-# (facts) -> (passed, detail)
-PredicateFn = Callable[[FactSet], tuple[bool, str]]
+if TYPE_CHECKING:  # imports for types only — gates has no runtime dependency on state
+    from sqlalchemy.orm import Session
+
+    from orchestrator.engine.plan import Node
+    from orchestrator.state.artifacts import ArtifactStore
+    from orchestrator.state.models import Run
+
+
+@dataclass(slots=True)
+class PredicateContext:
+    """What a predicate is allowed to look at.
+
+    Facts alone are not enough. `no_stale_approvals` has to compare approvals
+    against artifact versions, and `ac_test_matrix_complete` has to read the
+    requirement register — neither is expressible as a fact a tool emitted.
+
+    Everything beyond `facts` is optional, so a predicate that only needs facts
+    stays testable with one line of setup, and a predicate that needs the run
+    says so by failing clearly when it is absent.
+    """
+
+    facts: FactSet = field(default_factory=dict)
+    session: Session | None = None
+    run: Run | None = None
+    artifacts: ArtifactStore | None = None
+    node: Node | None = None
+
+    def require(self, *names: str) -> Any:
+        """Fetch context a predicate depends on, or explain what is missing.
+
+        A predicate given no run should report that as an ERROR about the
+        harness, not quietly evaluate to False and look like a finding.
+        """
+        missing = [name for name in names if getattr(self, name, None) is None]
+        if missing:
+            raise LookupError(
+                f"predicate needs {', '.join(missing)} but the gate was evaluated "
+                f"without it — this is a harness problem, not a failed check"
+            )
+        values = tuple(getattr(self, name) for name in names)
+        return values[0] if len(values) == 1 else values
+
+
+# (context) -> (passed, detail)
+PredicateFn = Callable[[PredicateContext], tuple[bool, str]]
 
 
 class UnknownPredicate(KeyError):

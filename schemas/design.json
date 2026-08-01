@@ -1,0 +1,101 @@
+{
+  "$defs": {
+    "DesignElement": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "satisfies": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Satisfies",
+          "type": "array"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "DesignElement",
+      "type": "object"
+    },
+    "Module": {
+      "additionalProperties": false,
+      "description": "One unit the implementation fans out over (\u00a75.1).",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "responsibility": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Responsibility"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "title": "Module",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The `design` artifact: what will be built, and what each part is for.",
+  "properties": {
+    "elements": {
+      "items": {
+        "$ref": "#/$defs/DesignElement"
+      },
+      "title": "Elements",
+      "type": "array"
+    },
+    "endpoints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Endpoints",
+      "type": "array"
+    },
+    "modules": {
+      "items": {
+        "$ref": "#/$defs/Module"
+      },
+      "title": "Modules",
+      "type": "array"
+    }
+  },
+  "title": "Design",
+  "type": "object"
+}

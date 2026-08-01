@@ -1,0 +1,176 @@
+{
+  "$defs": {
+    "AcceptanceCriterion": {
+      "additionalProperties": false,
+      "properties": {
+        "given": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Given"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "then": {
+          "title": "Then",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "id",
+        "then"
+      ],
+      "title": "AcceptanceCriterion",
+      "type": "object"
+    },
+    "Ambiguity": {
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answer"
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Disposition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "impact": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Impact",
+          "type": "array"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rationale"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "id",
+        "question",
+        "severity"
+      ],
+      "title": "Ambiguity",
+      "type": "object"
+    },
+    "Disposition": {
+      "description": "What was decided about an ambiguity.",
+      "enum": [
+        "resolved",
+        "assumption"
+      ],
+      "title": "Disposition",
+      "type": "string"
+    },
+    "Requirement": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance": {
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterion"
+          },
+          "title": "Acceptance",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "statement"
+      ],
+      "title": "Requirement",
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Severity",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Prose in, structured engineering problem out \u2014 the `intake` artifact.",
+  "properties": {
+    "ambiguities": {
+      "items": {
+        "$ref": "#/$defs/Ambiguity"
+      },
+      "title": "Ambiguities",
+      "type": "array"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/Requirement"
+      },
+      "title": "Requirements",
+      "type": "array"
+    }
+  },
+  "title": "RequirementRegister",
+  "type": "object"
+}

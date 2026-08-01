@@ -26,7 +26,7 @@ from enum import StrEnum
 from orchestrator.engine.plan import ExpressionCheck, Gate, GateCheck, PredicateCheck
 from orchestrator.gates import expressions
 from orchestrator.gates.facts import FactSet
-from orchestrator.gates.registry import PredicateRegistry, UnknownPredicate
+from orchestrator.gates.registry import PredicateContext, PredicateRegistry, UnknownPredicate
 from orchestrator.gates.registry import registry as default_registry
 
 
@@ -88,6 +88,7 @@ def evaluate_gate(
     facts: FactSet,
     *,
     registry: PredicateRegistry | None = None,
+    context: PredicateContext | None = None,
     evaluator: str = "orchestrator.gates",
 ) -> GateResult:
     """Evaluate every check in `gate` against `facts`.
@@ -96,9 +97,11 @@ def evaluate_gate(
     are present the gate requires both conditions.
     """
     registry = registry if registry is not None else default_registry
+    context = context or PredicateContext()
+    context.facts = facts
 
-    all_results = [_evaluate_check(check, facts, registry) for check in gate.all_checks]
-    any_results = [_evaluate_check(check, facts, registry) for check in gate.any_checks]
+    all_results = [_evaluate_check(check, facts, registry, context) for check in gate.all_checks]
+    any_results = [_evaluate_check(check, facts, registry, context) for check in gate.any_checks]
 
     verdict = _combine(all_results, any_results)
     return GateResult(verdict=verdict, checks=[*all_results, *any_results], evaluator=evaluator)
@@ -141,10 +144,15 @@ def _worst(verdicts) -> Verdict:
     return Verdict.PASS
 
 
-def _evaluate_check(check: GateCheck, facts: FactSet, registry: PredicateRegistry) -> CheckResult:
+def _evaluate_check(
+    check: GateCheck,
+    facts: FactSet,
+    registry: PredicateRegistry,
+    context: PredicateContext,
+) -> CheckResult:
     if isinstance(check, ExpressionCheck):
         return _evaluate_expression(check, facts)
-    return _evaluate_predicate(check, facts, registry)
+    return _evaluate_predicate(check, registry, context)
 
 
 def _evaluate_expression(check: ExpressionCheck, facts: FactSet) -> CheckResult:
@@ -187,7 +195,7 @@ def _evaluate_expression(check: ExpressionCheck, facts: FactSet) -> CheckResult:
 
 
 def _evaluate_predicate(
-    check: PredicateCheck, facts: FactSet, registry: PredicateRegistry
+    check: PredicateCheck, registry: PredicateRegistry, context: PredicateContext
 ) -> CheckResult:
     rendered = f"{check.predicate}()"
 
@@ -199,7 +207,7 @@ def _evaluate_predicate(
         return CheckResult(rendered, Verdict.ERROR, str(exc))
 
     try:
-        held, detail = predicate.fn(facts)
+        held, detail = predicate.fn(context)
     except Exception as exc:  # noqa: BLE001 — a broken predicate is an ERROR, not a FAIL
         return CheckResult(
             rendered,

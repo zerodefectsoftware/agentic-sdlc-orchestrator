@@ -1,0 +1,425 @@
+"""Predicate tests.
+
+The traceability predicates matter most. They are the strongest evidence this
+system produces — cheap to compute, impossible to fake — and each has two
+directions worth checking: nothing dropped, and nothing invented.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from orchestrator.artifacts import (
+    AcceptanceCriterion,
+    AcceptanceSuite,
+    AcceptanceTest,
+    Ambiguity,
+    Design,
+    DesignElement,
+    Disposition,
+    Finding,
+    Module,
+    Requirement,
+    RequirementRegister,
+    SecurityReport,
+    Severity,
+)
+from orchestrator.gates.facts import Fact, FactSource
+from orchestrator.gates.predicates import register_all
+from orchestrator.gates.registry import PredicateContext, PredicateRegistry
+from orchestrator.lineage import recorder
+from orchestrator.state import store
+from orchestrator.state.artifacts import ArtifactStore
+from orchestrator.state.models import Decision, NodeStatus
+
+
+@pytest.fixture
+def registry() -> PredicateRegistry:
+    return register_all(PredicateRegistry())
+
+
+@pytest.fixture
+def session():
+    with store.Store.in_memory().session() as session:
+        yield session
+
+
+@pytest.fixture
+def run(session):
+    return store.start_run(
+        session,
+        plan_name="greenfield",
+        plan_version=1,
+        requirement_path="requirements/greenfield.md",
+        target_profile="config/target.shortener.yaml",
+        nodes=[("intake", "agent", "requirements"), ("tests", "tool", "verification")],
+    )
+
+
+@pytest.fixture
+def artifacts(tmp_path) -> ArtifactStore:
+    return ArtifactStore(tmp_path)
+
+
+def record(session, run, artifacts, name: str, model) -> None:
+    body = model.model_dump_json() if hasattr(model, "model_dump_json") else json.dumps(model)
+    artifact = recorder.record_artifact(session, run, name=name, content=body)
+    artifact.path = str(artifacts.write(run.id, name, artifact.version, body))
+    session.flush()
+
+
+def context(session, run, artifacts, **extra) -> PredicateContext:
+    return PredicateContext(session=session, run=run, artifacts=artifacts, **extra)
+
+
+def check(registry, name, ctx) -> tuple[bool, str]:
+    return registry.get(name).fn(ctx)
+
+
+REGISTER = RequirementRegister(
+    requirements=[
+        Requirement(
+            id="R1",
+            statement="Submit a long URL, receive a short code",
+            acceptance=[AcceptanceCriterion(id="AC1.1", then="201 with a 7-character code")],
+        ),
+        Requirement(
+            id="R2",
+            statement="Visiting a short code redirects",
+            acceptance=[AcceptanceCriterion(id="AC2.1", then="302 to the original URL")],
+        ),
+    ],
+    ambiguities=[
+        Ambiguity(
+            id="A1",
+            question="301 or 302?",
+            severity=Severity.HIGH,
+            disposition=Disposition.RESOLVED,
+            answer="302 — 301 is cached and would break click analytics",
+        )
+    ],
+)
+
+
+# --------------------------------------------------------------------------- #
+# requirements
+# --------------------------------------------------------------------------- #
+
+
+def test_a_requirement_without_a_testable_criterion_fails(session, run, artifacts, registry):
+    register = REGISTER.model_copy(deep=True)
+    register.requirements.append(Requirement(id="R3", statement="be fast"))
+    record(session, run, artifacts, "intake.register", register)
+
+    passed, detail = check(
+        registry, "every_requirement_has_testable_ac", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "R3" in detail
+
+
+def test_an_empty_register_is_not_vacuously_valid(session, run, artifacts, registry):
+    """Zero requirements would otherwise pass every 'for all' check trivially."""
+    record(session, run, artifacts, "intake.register", RequirementRegister())
+    passed, detail = check(
+        registry, "every_requirement_has_testable_ac", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "no requirements" in detail
+
+
+def test_an_undisposed_ambiguity_blocks(session, run, artifacts, registry):
+    register = REGISTER.model_copy(deep=True)
+    register.ambiguities.append(
+        Ambiguity(id="A2", question="idempotent?", severity=Severity.MEDIUM)
+    )
+    record(session, run, artifacts, "intake.register", register)
+
+    passed, detail = check(
+        registry, "no_ambiguity_without_disposition", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "A2" in detail
+
+
+def test_a_recorded_assumption_counts_as_a_disposition(session, run, artifacts, registry):
+    """D13: only high-severity ambiguities need a human; the rest carry assumptions."""
+    register = REGISTER.model_copy(deep=True)
+    register.ambiguities.append(
+        Ambiguity(
+            id="A2",
+            question="idempotent?",
+            severity=Severity.MEDIUM,
+            disposition=Disposition.ASSUMPTION,
+            answer="No — each submission yields a new code",
+        )
+    )
+    record(session, run, artifacts, "intake.register", register)
+
+    passed, _ = check(
+        registry, "no_ambiguity_without_disposition", context(session, run, artifacts)
+    )
+    assert passed
+
+
+def test_an_open_high_severity_ambiguity_triggers_escalation(session, run, artifacts, registry):
+    register = REGISTER.model_copy(deep=True)
+    register.ambiguities.append(
+        Ambiguity(id="A3", question="rate limit scope?", severity=Severity.HIGH)
+    )
+    record(session, run, artifacts, "intake.register", register)
+
+    escalates, detail = check(
+        registry, "has_high_severity_ambiguity", context(session, run, artifacts)
+    )
+    assert escalates
+    assert "A3" in detail
+
+
+def test_a_disposed_high_ambiguity_does_not_escalate_again(session, run, artifacts, registry):
+    record(session, run, artifacts, "intake.register", REGISTER)
+    escalates, _ = check(
+        registry, "has_high_severity_ambiguity", context(session, run, artifacts)
+    )
+    assert not escalates
+
+
+# --------------------------------------------------------------------------- #
+# traceability — both directions
+# --------------------------------------------------------------------------- #
+
+DESIGN = Design(
+    elements=[
+        DesignElement(id="E1", kind="endpoint", satisfies=["R1"]),
+        DesignElement(id="E2", kind="endpoint", satisfies=["R2"]),
+    ],
+    modules=[Module(name="api", path="api")],
+    endpoints=["/shorten", "/{code}"],
+)
+
+
+def test_a_requirement_with_no_design_is_caught(session, run, artifacts, registry):
+    """Nothing silently dropped between stages."""
+    record(session, run, artifacts, "intake.register", REGISTER)
+    partial = Design(elements=[DesignElement(id="E1", kind="endpoint", satisfies=["R1"])])
+    record(session, run, artifacts, "design.design", partial)
+
+    passed, detail = check(
+        registry, "requirement_design_matrix_complete", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "R2" in detail
+
+
+def test_a_design_element_nobody_asked_for_is_caught(session, run, artifacts, registry):
+    """The reverse direction — gold-plating."""
+    record(session, run, artifacts, "intake.register", REGISTER)
+    padded = DESIGN.model_copy(deep=True)
+    padded.elements.append(DesignElement(id="E9", kind="endpoint", satisfies=["R99"]))
+    record(session, run, artifacts, "design.design", padded)
+
+    passed, detail = check(
+        registry, "no_unmapped_design_elements", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "E9" in detail
+    assert "nobody asked for" in detail
+
+
+def test_a_complete_matrix_passes_in_both_directions(session, run, artifacts, registry):
+    record(session, run, artifacts, "intake.register", REGISTER)
+    record(session, run, artifacts, "design.design", DESIGN)
+    ctx = context(session, run, artifacts)
+
+    assert check(registry, "requirement_design_matrix_complete", ctx)[0]
+    assert check(registry, "no_unmapped_design_elements", ctx)[0]
+
+
+def test_an_uncovered_acceptance_criterion_is_named(session, run, artifacts, registry):
+    record(session, run, artifacts, "intake.register", REGISTER)
+    record(
+        session,
+        run,
+        artifacts,
+        "tests-acceptance.suite",
+        AcceptanceSuite(tests=[AcceptanceTest(id="t1", covers=["AC1.1"])]),
+    )
+
+    passed, detail = check(registry, "every_ac_has_a_test", context(session, run, artifacts))
+    assert not passed
+    assert "AC2.1" in detail
+
+
+def test_full_coverage_passes(session, run, artifacts, registry):
+    record(session, run, artifacts, "intake.register", REGISTER)
+    record(
+        session,
+        run,
+        artifacts,
+        "tests-acceptance.suite",
+        AcceptanceSuite(tests=[AcceptanceTest(id="t1", covers=["AC1.1", "AC2.1"])]),
+    )
+    assert check(registry, "ac_test_matrix_complete", context(session, run, artifacts))[0]
+
+
+# --------------------------------------------------------------------------- #
+# security
+# --------------------------------------------------------------------------- #
+
+
+def test_an_open_high_finding_blocks_release(session, run, artifacts, registry):
+    report = SecurityReport(
+        findings=[Finding(id="S1", title="open redirect", severity=Severity.HIGH)]
+    )
+    record(session, run, artifacts, "security.report", report)
+
+    passed, detail = check(
+        registry, "no_unapproved_high_findings", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "S1" in detail
+
+
+def test_a_waiver_with_no_person_named_is_not_a_waiver(session, run, artifacts, registry):
+    """D15: an agent cannot waive a finding, so an unattributed waiver is void."""
+    report = SecurityReport(
+        findings=[
+            Finding(id="S1", title="open redirect", severity=Severity.HIGH, waived=True)
+        ]
+    )
+    record(session, run, artifacts, "security.report", report)
+
+    passed, detail = check(
+        registry, "no_unapproved_high_findings", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "no person named" in detail
+
+
+def test_a_human_waiver_is_accepted(session, run, artifacts, registry):
+    report = SecurityReport(
+        findings=[
+            Finding(
+                id="S1",
+                title="open redirect",
+                severity=Severity.HIGH,
+                waived=True,
+                waived_by="alice",
+                rationale="destination allowlist ships next sprint",
+            )
+        ]
+    )
+    record(session, run, artifacts, "security.report", report)
+    assert check(registry, "no_unapproved_high_findings", context(session, run, artifacts))[0]
+
+
+# --------------------------------------------------------------------------- #
+# release readiness
+# --------------------------------------------------------------------------- #
+
+
+def test_a_stale_approval_blocks_release(session, run, artifacts, registry):
+    """D10, reaching G10."""
+    v1 = recorder.record_artifact(session, run, name="design.openapi", content="v1")
+    approval = recorder.request_approval(session, run, node_id="design-approval", artifacts=[v1])
+    recorder.decide(session, approval, decision=Decision.APPROVED, decided_by="alice")
+    recorder.record_artifact(session, run, name="design.openapi", content="v2")
+
+    passed, detail = check(registry, "no_stale_approvals", context(session, run, artifacts))
+    assert not passed
+    assert "v2 now exists" in detail
+
+
+def test_an_unfinished_node_blocks_release(session, run, artifacts, registry):
+    passed, detail = check(
+        registry, "no_node_in_nonterminal_state", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "intake" in detail
+
+
+def test_an_orphaned_artifact_blocks_release(session, run, artifacts, registry):
+    recorder.record_artifact(session, run, name="mystery", content="{}")
+    passed, detail = check(registry, "lineage_complete", context(session, run, artifacts))
+    assert not passed
+    assert "mystery" in detail
+
+
+def test_a_failed_node_blocks_release(session, run, artifacts, registry):
+    store.get_node(session, run, "tests").status = NodeStatus.FAILED
+    session.flush()
+
+    passed, detail = check(
+        registry, "all_upstream_gates_green", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "tests" in detail
+
+
+# --------------------------------------------------------------------------- #
+# documentation
+# --------------------------------------------------------------------------- #
+
+
+def test_the_docs_gate_needs_evidence_the_setup_actually_ran(session, run, artifacts, registry):
+    """A doc gate that checks for headings is vacuous; one that trusts the author
+    is worse."""
+    passed, detail = check(
+        registry, "setup_steps_execute_in_clean_venv", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "no recorded result" in detail
+
+
+def test_failing_setup_steps_fail_the_docs_gate(session, run, artifacts, registry):
+    ctx = context(session, run, artifacts)
+    ctx.facts = {"setup.exit_code": Fact(1, FactSource.TOOL, "setup")}
+    passed, detail = check(registry, "setup_steps_execute_in_clean_venv", ctx)
+    assert not passed
+    assert "exit code 1" in detail
+
+
+def test_working_setup_steps_pass(session, run, artifacts, registry):
+    ctx = context(session, run, artifacts)
+    ctx.facts = {"setup.exit_code": Fact(0, FactSource.TOOL, "setup")}
+    assert check(registry, "setup_steps_execute_in_clean_venv", ctx)[0]
+
+
+def test_an_undocumented_endpoint_is_caught(session, run, artifacts, registry):
+    record(session, run, artifacts, "design.design", DESIGN)
+    body = "## API\n\nPOST /shorten — create a short link\n"
+    artifact = recorder.record_artifact(session, run, name="docs.readme", content=body)
+    artifact.path = str(artifacts.write(run.id, "docs.readme", artifact.version, body))
+    session.flush()
+
+    passed, detail = check(
+        registry, "documented_endpoints_match_openapi", context(session, run, artifacts)
+    )
+    assert not passed
+    assert "/{code}" in detail
+
+
+# --------------------------------------------------------------------------- #
+# the harness itself
+# --------------------------------------------------------------------------- #
+
+
+def test_a_predicate_without_its_context_reports_a_harness_problem(registry):
+    """Not a finding: evaluating without a run should read as ERROR, not FAIL."""
+    with pytest.raises(LookupError, match="harness problem"):
+        check(registry, "no_stale_approvals", PredicateContext())
+
+
+def test_every_predicate_the_greenfield_plan_names_is_registered(registry):
+    from orchestrator.engine.loader import load_plan
+
+    plan = load_plan("plans/greenfield.yaml")
+    assert registry.missing(plan.required_predicates) == []
+
+
+def test_every_registered_predicate_describes_itself(registry):
+    """The description is what a preflight check shows when something is missing."""
+    for name in registry.names:
+        assert registry.get(name).description

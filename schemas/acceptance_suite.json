@@ -1,0 +1,37 @@
+{
+  "$defs": {
+    "AcceptanceTest": {
+      "additionalProperties": false,
+      "properties": {
+        "covers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Covers",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "AcceptanceTest",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "tests": {
+      "items": {
+        "$ref": "#/$defs/AcceptanceTest"
+      },
+      "title": "Tests",
+      "type": "array"
+    }
+  },
+  "title": "AcceptanceSuite",
+  "type": "object"
+}

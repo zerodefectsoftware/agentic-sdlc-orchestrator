@@ -73,6 +73,26 @@ def test_appendix_a_matches_the_real_plan_file():
     )
 
 
+def test_generated_schemas_match_their_models():
+    """D8: the contract an agent is held to is derived, not hand-written.
+
+    If `schemas/*.json` were maintained by hand they would drift from the models
+    the predicates read, and an agent would be graded against a contract nobody
+    was checking.
+    """
+    import json
+
+    from orchestrator.artifacts import SCHEMAS
+
+    for name, model in SCHEMAS.items():
+        path = REPO / "schemas" / f"{name}.json"
+        assert path.exists(), f"schemas/{name}.json has not been generated"
+        on_disk = json.loads(path.read_text())
+        assert on_disk == model.model_json_schema(), (
+            f"schemas/{name}.json is stale — regenerate it from {model.__name__}"
+        )
+
+
 def test_run_targets_declare_their_execution_scheme():
     """`run:` covers both Python callables and shell commands; guessing is a bug."""
     for path in sorted((REPO / "plans").glob("*.yaml")):
