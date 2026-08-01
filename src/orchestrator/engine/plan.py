@@ -199,6 +199,7 @@ class Node(BaseModel):
     # What the node consumes and produces
     inputs: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
+    output_files: dict[str, str] = Field(default_factory=dict)  # output -> path on disk
     output_schema: str | None = None
     emits: str | None = None
 

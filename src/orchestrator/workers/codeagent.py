@@ -120,6 +120,11 @@ def _refuse_if_guard_was_shadowed(node: Node, raised: list) -> None:
         str(warning.message)
         for warning in raised
         if "CanUseToolShadowed" in type(warning.message).__name__
+        # Read tools are auto-approved deliberately: the guard exists to decide
+        # writes, and refusing a session because `Grep` skipped the callback
+        # would throw away work the guard actually governed. Only a shadowed
+        # *write* tool means the scope did not apply.
+        and any(tool in str(warning.message) for tool in WRITE_TOOLS)
     ]
     if shadowed:
         raise WorkerError(
@@ -198,7 +203,7 @@ class CodeAgentWorker:
 
         return WorkerResult(
             facts=self._facts(node, guard, outcome),
-            artifacts=(self._changeset(node, guard),),
+            artifacts=(self._changeset(node, guard), *self._declared(node)),
             consumed=tuple(sorted(inputs)),
             model=node.model,
             prompt_ref=str(self._prompt_path(node)),
@@ -348,6 +353,30 @@ class CodeAgentWorker:
                 len(guard.denied), FactSource.VALIDATOR, "scope-guard"
             ),
         }
+
+    def _declared(self, node: Node) -> tuple[ProducedArtifact, ...]:
+        """Read the files the plan says this node produces.
+
+        A code agent writes files; gates read artifacts. Without this the two
+        never meet: `tests-acceptance` declares `outputs: [suite]`, the agent
+        writes the suite to disk, and `every_ac_has_a_test` then ERRORs because
+        no artifact by that name was ever recorded — which is what happened on
+        the first session that ran to completion.
+
+        A declared file that is missing is a worker error, not an empty
+        artifact. The plan asked for it; a silent absence would reach the gate
+        as "the check could not be performed" and hide whose fault that was.
+        """
+        produced: list[ProducedArtifact] = []
+        for output, relative in node.output_files.items():
+            path = self.cwd / relative
+            if not path.exists():
+                raise WorkerError(
+                    f"'{node.id}' declares output '{output}' at {relative}, which the "
+                    f"session did not write. The role prompt has to say where it goes."
+                )
+            produced.append(ProducedArtifact(f"{node.id}.{output}", path.read_text()))
+        return tuple(produced)
 
     def _changeset(self, node: Node, guard: ScopeGuard) -> ProducedArtifact:
         """A manifest of what this node changed, and what it was stopped from changing."""

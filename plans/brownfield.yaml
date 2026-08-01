@@ -124,6 +124,8 @@ override:
     inputs: [intake.artifacts.register, design.artifacts.spec,
              impact-analysis.artifacts.report]
     outputs: [suite]
+    output_files:
+      suite: "{target.tests_root}/acceptance_suite.json"
     write_scope: ["{target.tests_root}/**"]
     verify:
       - "sh:{target.commands.test}"     # a code agent cannot report its own red

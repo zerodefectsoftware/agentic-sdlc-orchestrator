@@ -333,3 +333,53 @@ def test_a_shadowed_guard_stops_the_run(prompts):
 
     with pytest.raises(WorkerError, match="scope guard .* was bypassed"):
         worker(build, prompts).run(node(), {}, scope())
+
+
+def test_a_declared_output_is_read_off_disk_and_recorded(prompts, tmp_path):
+    """A code agent writes files; gates read artifacts. Without this the two
+    never meet — the first session that ran to completion wrote a perfectly good
+    suite and the gate still ERRORed with 'no artifact has been recorded'."""
+    (tmp_path / "target" / "tests").mkdir(parents=True)
+    (tmp_path / "target" / "tests" / "suite.json").write_text('{"tests": []}')
+
+    result = CodeAgentWorker(
+        cwd=tmp_path, prompts_dir=prompts, session=session_writing([])
+    ).run(
+        node(output_files={"suite": "target/tests/suite.json"}, outputs=["suite"]),
+        {},
+        scope(),
+    )
+
+    produced = {a.name: a.content for a in result.artifacts}
+    assert produced["impl:api.suite"] == '{"tests": []}'
+
+
+def test_a_declared_output_the_session_did_not_write_is_an_error(prompts, tmp_path):
+    """Silent absence would reach the gate as 'the check could not be performed'
+    and hide whose fault that was."""
+    with pytest.raises(WorkerError, match="declares output 'suite'"):
+        CodeAgentWorker(
+            cwd=tmp_path, prompts_dir=prompts, session=session_writing([])
+        ).run(node(output_files={"suite": "target/tests/missing.json"}), {}, scope())
+
+
+def test_a_shadowed_read_tool_does_not_discard_the_session(prompts):
+    """Read tools are auto-approved deliberately. Refusing a session because
+    `Grep` skipped the callback throws away work the guard actually governed."""
+
+    class CanUseToolShadowedWarning(UserWarning):
+        pass
+
+    def build(node, prompt, guard):
+        async def query(*, prompt, options):
+            warnings.warn(
+                "can_use_tool will not be invoked for: Read, Glob, Grep",
+                CanUseToolShadowedWarning,
+                stacklevel=1,
+            )
+            yield ResultMessage()
+
+        return query, {}
+
+    result = worker(build, prompts).run(node(), {}, scope())
+    assert result.facts["impl:api.session_ended"].value == "stop"

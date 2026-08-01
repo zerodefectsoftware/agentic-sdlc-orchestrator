@@ -25,6 +25,20 @@ the duplicate, the malformed input, the boundary value. If an edge case is not
 implied by any criterion, it is not yours to invent — it is an ambiguity
 somebody should have recorded.
 
+## The manifest
+
+Alongside the tests, write **`target/tests/acceptance_suite.json`** — the
+machine-readable form of the same mapping:
+
+```json
+{"tests": [{"id": "test_r1_create.py::test_valid_url_is_accepted", "covers": ["AC1.1"]}]}
+```
+
+Every test you wrote appears once, with the criterion ids it covers. The
+traceability gate reads this file, not your docstrings; a criterion missing from
+it fails the run whether or not a test exists. Nothing else may appear in the
+object — it is validated against a schema.
+
 ## Constraints
 
 Write only tests. You cannot change source, and you cannot run anything.

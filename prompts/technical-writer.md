@@ -32,3 +32,10 @@ convincing. Short sentences. No marketing.
 
 Do not document what does not exist. Aspirational documentation is worse than
 none, because a reader cannot tell which parts are true.
+
+
+## Where it goes
+
+The README is **`target/README.md`**. The documentation gate reads that exact
+path and compares the endpoints you document against the design's contract, so a
+README written anywhere else fails the node rather than the check.

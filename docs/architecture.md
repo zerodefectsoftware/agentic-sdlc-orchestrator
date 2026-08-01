@@ -927,6 +927,8 @@ nodes:
     stage: verification
     role: test-author                 # deliberately NOT the implementer (D5)
     outputs: [suite]                  # gates read tests-acceptance.suite
+    output_files:                     # ...and the agent writes it here
+      suite: "{target.tests_root}/acceptance_suite.json"
     needs: [scaffold]
     inputs: [intake.artifacts.register, design.artifacts.spec]
     write_scope: ["{target.tests_root}/**"]
@@ -983,6 +985,8 @@ nodes:
     stage: documentation
     role: technical-writer
     outputs: [readme]                 # gates read docs.readme
+    output_files:
+      readme: target/README.md
     needs: [impl]
     inputs: [design.artifacts.spec, intake.artifacts.register]
     effort: medium
