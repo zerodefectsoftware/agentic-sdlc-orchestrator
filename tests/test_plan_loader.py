@@ -61,6 +61,7 @@ def test_greenfield_plan_loads(plan):
         "intake",
         "ambiguity-triage",
         "clarify-with-human",
+        "normalize-clarification",
         "design",
         "design-approval",
         "scaffold",

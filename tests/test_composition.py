@@ -312,6 +312,16 @@ def test_the_scenarios_are_deltas_not_copies():
         assert "nodes" not in body
 
 
+def test_greenfield_normalizes_a_clarification_too():
+    """The clarification path belongs to the spine, not to the ambiguous plan —
+    a run that stops for an answer must fold it back in wherever that happens."""
+    plan = load_plan(PLANS / "greenfield.yaml", profile=PROFILE)
+
+    normalize = plan.node("normalize-clarification")
+    assert normalize.optional is True          # skipped unless triage escalates
+    assert normalize.needs == ["clarify-with-human"]
+
+
 def test_brownfield_orders_the_baseline_before_anything_reads_the_code():
     plan = load_plan(PLANS / "brownfield.yaml", profile=PROFILE)
     graph = dependency_graph(plan)
@@ -379,7 +389,8 @@ def test_ambiguous_normalizes_the_answer_before_designing():
     plan = load_plan(PLANS / "ambiguous.yaml", profile=PROFILE)
 
     assert plan.node("normalize-clarification").needs == ["clarify-with-human"]
-    assert plan.node("design").needs == ["normalize-clarification"]
+    assert plan.node("normalize-clarification").optional is False   # mandatory here
+    assert "normalize-clarification" in plan.node("design").needs
 
 
 def test_ambiguous_lowers_the_escalation_threshold_in_data():

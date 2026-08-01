@@ -475,3 +475,62 @@ def test_an_unbalanced_path_parameter_fails(registry, session, run, artifacts):
     passed, detail = contract(registry, session, run, artifacts, design_with("GET /{code"))
     assert not passed
     assert "unbalanced" in detail or "not '<METHOD>" in detail
+
+
+# --------------------------------------------------------------------------- #
+# triage's exit gate — asserting the policy ran, not that nobody is needed
+# --------------------------------------------------------------------------- #
+
+
+def triaged(registry, session, run, artifacts, *ambiguities, threshold=None):
+    from orchestrator.engine.plan import Node
+
+    record(session, run, artifacts, "intake.register", RequirementRegister(
+        ambiguities=list(ambiguities)
+    ))
+    node = Node.model_validate({
+        "id": "ambiguity-triage",
+        "kind": "tool",
+        "stage": "requirements",
+        "run": "py:orchestrator.policy.triage_ambiguities",
+        "params": {"threshold": threshold} if threshold else {},
+    })
+    return check(
+        registry,
+        "every_ambiguity_is_disposed_or_escalated",
+        context(session, run, artifacts, node=node),
+    )
+
+
+def test_an_open_high_ambiguity_is_the_node_working(registry, session, run, artifacts):
+    """The bug a live run found: gating on 'nothing undisposed' fails exactly
+    when the escalation path is doing its job, so the node burned its retry
+    budget re-running a pure function and never reached `on_escalate`."""
+    passed, detail = triaged(
+        registry, session, run, artifacts,
+        Ambiguity(id="A1", question="301 or 302?", severity=Severity.HIGH),
+        Ambiguity(id="A2", question="idempotent?", severity=Severity.MEDIUM,
+                  disposition=Disposition.ASSUMPTION, answer="assumed"),
+    )
+    assert passed
+    assert "await a person" in detail
+
+
+def test_a_skipped_low_severity_ambiguity_fails_the_gate(registry, session, run, artifacts):
+    """Below the threshold and undisposed means the policy missed it."""
+    passed, detail = triaged(
+        registry, session, run, artifacts,
+        Ambiguity(id="A9", question="page size?", severity=Severity.LOW),
+    )
+    assert not passed
+    assert "A9" in detail
+
+
+def test_the_threshold_the_plan_set_is_the_one_checked(registry, session, run, artifacts):
+    """`ambiguous.yaml` lowers it to medium; an open MEDIUM is then legitimate."""
+    passed, _ = triaged(
+        registry, session, run, artifacts,
+        Ambiguity(id="A2", question="scope?", severity=Severity.MEDIUM),
+        threshold="medium",
+    )
+    assert passed

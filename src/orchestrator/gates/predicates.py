@@ -35,6 +35,7 @@ from orchestrator.artifacts import (
     ImpactAnalysis,
     RequirementRegister,
     SecurityReport,
+    Severity,
 )
 from orchestrator.gates.registry import PredicateContext, PredicateRegistry
 from orchestrator.gates.registry import registry as default_registry
@@ -131,6 +132,51 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
         if open_items:
             return False, f"{len(open_items)} ambiguities undisposed: {_listed(open_items)}"
         return True, f"all {len(register.ambiguities)} ambiguities disposed"
+
+    @reg.register(
+        "every_ambiguity_is_disposed_or_escalated",
+        "triage disposed of everything below the threshold and left the rest for a person",
+    )
+    def every_ambiguity_is_disposed_or_escalated(
+        context: PredicateContext,
+    ) -> tuple[bool, str]:
+        """The exit gate for a node whose job is to escalate.
+
+        `no_ambiguity_without_disposition` cannot be that gate: an ambiguity
+        above the threshold is *supposed* to stay open until a human answers, so
+        the gate fails exactly when the escalation path is working. The node then
+        burns its retry budget re-running a pure function, and the failure escape
+        hatch fires instead of the `on_escalate` target the plan named.
+
+        What this asserts is that the policy was applied: everything below the
+        threshold carries a recorded assumption, and everything at or above it is
+        left for a person. Whether those questions were answered is a release
+        question — `no_ambiguity_without_disposition` holds that line at G10.
+        """
+        register = _load(context, "intake.register", RequirementRegister)
+        node = context.node
+        threshold = Severity(
+            str((node.params.get("threshold") if node else None) or Severity.HIGH).lower()
+        )
+
+        skipped = [
+            a.id
+            for a in register.ambiguities
+            if not a.is_disposed and a.severity.rank < threshold.rank
+        ]
+        if skipped:
+            return False, (
+                f"{len(skipped)} ambiguities below the '{threshold}' threshold were "
+                f"left undisposed — the policy skipped them: {_listed(skipped)}"
+            )
+
+        open_items = [a.id for a in register.ambiguities if not a.is_disposed]
+        if open_items:
+            return True, (
+                f"{len(open_items)} ambiguities at or above '{threshold}' await a person "
+                f"({_listed(open_items)}); the rest carry recorded assumptions"
+            )
+        return True, f"all {len(register.ambiguities)} ambiguities disposed by policy"
 
     @reg.register(
         "has_high_severity_ambiguity",

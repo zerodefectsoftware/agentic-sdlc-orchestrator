@@ -16,10 +16,6 @@ from orchestrator.workers.pytask import Task, TaskOutput
 
 ESCALATION_THRESHOLD = Severity.HIGH
 
-# Ordered, so "escalate at this severity and above" is expressible.
-RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2}
-
-
 def triage_ambiguities(task: Task) -> TaskOutput:
     """Dispose of every ambiguity: escalate it, or record an assumption.
 
@@ -38,7 +34,7 @@ def triage_ambiguities(task: Task) -> TaskOutput:
     for ambiguity in register.ambiguities:
         if ambiguity.is_disposed:
             continue
-        if RANK[ambiguity.severity] >= RANK[threshold]:
+        if ambiguity.severity.rank >= threshold.rank:
             escalate.append(ambiguity.id)
             continue
         # Below the threshold: record the assumption and carry it forward, so a

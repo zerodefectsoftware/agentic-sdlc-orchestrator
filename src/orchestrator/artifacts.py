@@ -29,6 +29,11 @@ class Severity(StrEnum):
     def is_high(self) -> bool:
         return self is Severity.HIGH
 
+    @property
+    def rank(self) -> int:
+        """Ordered, so "at this severity and above" is expressible."""
+        return {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2}[self]
+
 
 class Disposition(StrEnum):
     """What was decided about an ambiguity."""

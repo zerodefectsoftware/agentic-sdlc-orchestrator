@@ -840,26 +840,47 @@ nodes:
     stage: requirements
     needs: [intake]
     run: py:orchestrator.policy.triage_ambiguities
+    retry_budget: 0                   # pure function: a second run cannot disagree
     escalate_when:
       predicate: has_high_severity_ambiguity
     on_escalate: clarify-with-human
-    gate:                             # G2
-      all:
-        - predicate: no_ambiguity_without_disposition
+    gate:                             # G2 — the policy ran, not that nothing needs a human.
+      all:                            # An open HIGH ambiguity is this node working, and
+                                      # gating on its absence would fail exactly then.
+        - predicate: every_ambiguity_is_disposed_or_escalated
 
   - id: clarify-with-human
     kind: human
     stage: requirements
     optional: true                    # only instantiated when triage escalates
     autonomy: APPROVE
-    presents: [intake.artifacts.ambiguities]
+    presents: [intake.artifacts.register]
+
+  - id: normalize-clarification
+    kind: tool
+    stage: requirements
+    needs: [clarify-with-human]
+    optional: true                    # activated with the checkpoint it processes
+    run: py:orchestrator.policy.normalize_clarification
+    params:
+      checkpoint: clarify-with-human
+    inputs: [intake.artifacts.register]
+    outputs: [register]
+    # Without this, clarification is theatre: the run stops, a person answers,
+    # and the answer sits in the audit trail while design works from the same
+    # unresolved register. Re-emitting `intake.register` is also what makes it
+    # stateful — downstream consumers invalidate, bound approvals go stale (D10).
+    gate:                             # G2b
+      all:
+        - "clarification.resolved > 0"
+        - predicate: no_ambiguity_without_disposition
 
   # ── Design ──────────────────────────────────────────────────────────────
   - id: design
     kind: agent
     stage: design
     role: architect
-    needs: [ambiguity-triage]
+    needs: [ambiguity-triage, normalize-clarification]   # SKIPPED when nothing escalated
     inputs: [intake.artifacts.register]
     output_schema: schemas/design.json
     outputs: [spec, modules]          # gates read design.spec;
@@ -990,6 +1011,7 @@ nodes:
       all:
         - predicate: all_upstream_gates_green
         - predicate: no_unapproved_high_findings
+        - predicate: no_ambiguity_without_disposition   # nothing ships with an open question
         - predicate: lineage_complete
         - predicate: no_node_in_nonterminal_state
         - predicate: no_stale_approvals

@@ -500,10 +500,29 @@ class Scheduler:
         if verdict is Verdict.FAIL:
             return
 
-        target = store.get_node(session, run, node.on_escalate)
-        if target is not None and target.status is NodeStatus.SKIPPED:
-            target.status = NodeStatus.PENDING
-            session.flush()
+        self._activate(session, run, node.on_escalate)
+
+    def _activate(self, session: Session, run: Run, node_id: str) -> None:
+        """Wake an optional node, and the optional work that follows it.
+
+        Transitive on purpose. A checkpoint usually exists to be *processed* —
+        `clarify-with-human` is followed by the node that folds the answer back
+        into the register — and activating only the checkpoint leaves that node
+        skipped forever. The result is a run that stops, gets an answer, and
+        then behaves as though nobody had answered.
+
+        Only SKIPPED optional nodes are touched: everything else is already in
+        the graph's ordinary flow, and forcing a status on it would be the
+        scheduler overruling the plan.
+        """
+        for candidate in [node_id, *nx.descendants(self._graph, node_id)]:
+            node = self._node(candidate)
+            if node is None or not node.optional:
+                continue
+            execution = store.get_node(session, run, candidate)
+            if execution is not None and execution.status is NodeStatus.SKIPPED:
+                execution.status = NodeStatus.PENDING
+        session.flush()
 
     def _insert_repair(self, session: Session, run: Run, node: Node, execution) -> None:
         """Insert a fix node, then re-enter the failed node (§6)."""

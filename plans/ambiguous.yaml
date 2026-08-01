@@ -55,12 +55,13 @@ override:
     run: py:orchestrator.policy.triage_ambiguities
     params:
       threshold: medium
+    retry_budget: 0                     # pure function: a second run cannot disagree
     escalate_when:
       predicate: has_high_severity_ambiguity
     on_escalate: clarify-with-human
     gate:                               # G2
       all:
-        - predicate: no_ambiguity_without_disposition
+        - predicate: every_ambiguity_is_disposed_or_escalated
 
   # Not optional here. Greenfield instantiates this node only when triage
   # escalates; this plan always stops to ask, because a requirement this vague
@@ -74,14 +75,32 @@ override:
     autonomy: APPROVE
     presents: [intake.artifacts.register]
 
-  # Reads the normalized register, not the raw one — and cannot start until
-  # normalization has happened, which is the whole reason that node exists.
+  # Mandatory here, where greenfield activates it only on escalation. The
+  # answer is folded back into the register as a structured, attributable
+  # disposition per question — see orchestrator/policy/clarify.py.
+  normalize-clarification:
+    id: normalize-clarification
+    kind: tool
+    stage: requirements
+    needs: [clarify-with-human]
+    optional: false
+    run: py:orchestrator.policy.normalize_clarification
+    params:
+      checkpoint: clarify-with-human
+    inputs: [intake.artifacts.register]
+    outputs: [register]
+    gate:                               # A1
+      all:
+        - "clarification.resolved > 0"  # the checkpoint produced an answer
+        - predicate: no_ambiguity_without_disposition
+
+  # Reads the normalized register, not the raw one.
   design:
     id: design
     kind: agent
     stage: design
     role: architect
-    needs: [normalize-clarification]
+    needs: [ambiguity-triage, normalize-clarification]
     inputs: [intake.artifacts.register]
     output_schema: schemas/design.json
     outputs: [spec, modules]
@@ -108,27 +127,3 @@ override:
         - predicate: lineage_complete
         - predicate: no_node_in_nonterminal_state
         - predicate: no_stale_approvals
-
-insert_after:
-
-  clarify-with-human:
-    # Normalization. Without it, clarification is theatre: the run stops, a
-    # person answers, and the answer sits in the audit trail while every
-    # downstream node keeps working from the unresolved register.
-    #
-    # Re-emitting `intake.register` is what makes this stateful rather than
-    # advisory — it is a new version of an artifact upstream nodes already
-    # produced, so anything downstream that had consumed the old one is
-    # invalidated and any approval bound to it goes stale (D10).
-    - id: normalize-clarification
-      kind: tool
-      stage: requirements
-      run: py:orchestrator.policy.normalize_clarification
-      params:
-        checkpoint: clarify-with-human
-      inputs: [intake.artifacts.register]
-      outputs: [register]
-      gate:                             # A1
-        all:
-          - "clarification.resolved > 0"      # the checkpoint produced an answer
-          - predicate: no_ambiguity_without_disposition

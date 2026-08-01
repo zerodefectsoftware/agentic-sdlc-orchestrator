@@ -42,8 +42,12 @@ def test_every_plan_parses_and_declares_required_fields():
         plan = yaml.safe_load(path.read_text())
         assert plan.get("plan"), f"{path.name}: missing 'plan'"
         assert plan.get("version"), f"{path.name}: missing 'version'"
-        nodes = plan.get("nodes") or plan.get("insert_after")
-        assert nodes, f"{path.name}: declares neither 'nodes' nor 'insert_after'"
+        # A plan either authors nodes or changes another plan's. A delta that
+        # only overrides is legitimate: `ambiguous.yaml` adds no nodes at all.
+        content = plan.get("nodes") or any(
+            plan.get(directive) for directive in ("insert_after", "override", "remove")
+        )
+        assert content, f"{path.name}: authors no nodes and changes none"
 
 
 def test_plan_node_ids_are_unique_and_dependencies_resolve():
