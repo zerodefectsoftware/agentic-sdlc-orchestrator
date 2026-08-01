@@ -24,6 +24,7 @@ nodes:
     kind: agent
     stage: design
     role: architect
+    output_schema: schemas/design.json
     outputs: [openapi]
   - id: design-approval
     kind: human
@@ -50,11 +51,15 @@ def workspace(tmp_path, monkeypatch):
     plans = tmp_path / "plans"
     plans.mkdir()
     (plans / "demo.yaml").write_text(textwrap.dedent(PLAN))
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "architect.md").write_text("You design.")
     (tmp_path / "requirement.md").write_text("Build something.")
     (tmp_path / "target.yaml").write_text("target: {}\n")
 
     monkeypatch.setenv("ORCHESTRATOR_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("ORCHESTRATOR_PLANS_DIR", str(plans))
+    monkeypatch.setenv("ORCHESTRATOR_PROMPTS_DIR", str(prompts))
     monkeypatch.setenv("ORCHESTRATOR_WORKER", "stub")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     reset_settings()
@@ -167,6 +172,59 @@ def test_the_real_greenfield_plan_passes_preflight(cli):
     result = CliRunner().invoke(app, ["preflight", "--plan", "plans/greenfield.yaml"])
     assert result.exit_code == 0, result.output
     assert "every predicate is registered" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# dry run
+# --------------------------------------------------------------------------- #
+
+
+def test_a_dry_run_executes_nothing(cli, workspace):
+    """It should be safe to point at a live configuration you cannot yet run."""
+    invoke(
+        cli, workspace, "run", "--dry-run",
+        "--plan", str(workspace / "plans" / "demo.yaml"),
+        "--requirement", str(workspace / "requirement.md"),
+    )
+    result = cli.invoke(app, ["runs"])
+    assert "demo" not in result.output  # no run was recorded
+
+
+def test_a_dry_run_shows_what_each_node_would_dispatch(cli, workspace):
+    output = invoke(
+        cli, workspace, "run", "--dry-run",
+        "--plan", str(workspace / "plans" / "demo.yaml"),
+        "--requirement", str(workspace / "requirement.md"),
+    )
+
+    assert "nothing will execute" in output
+    assert "design" in output
+    assert "architect.md" in output      # the prompt it would send
+    assert "RequirementRegister" in output or "Design" in output
+
+
+def test_a_dry_run_needs_no_credential(cli, workspace, monkeypatch):
+    """The point is inspecting a configuration on a machine that cannot run it."""
+    monkeypatch.setenv("ORCHESTRATOR_WORKER", "live")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    reset_settings()
+
+    result = cli.invoke(
+        app, ["run", "--dry-run", "--plan", str(workspace / "plans" / "demo.yaml")]
+    )
+    assert "ANTHROPIC_API_KEY" not in result.output
+
+
+def test_a_dry_run_fails_when_a_node_could_not_dispatch(cli, workspace, monkeypatch):
+    """Surfacing this before a live run is the whole point of the flag."""
+    monkeypatch.setenv("ORCHESTRATOR_PROMPTS_DIR", str(workspace / "absent"))
+    reset_settings()
+
+    result = cli.invoke(
+        app, ["run", "--dry-run", "--plan", str(workspace / "plans" / "demo.yaml")]
+    )
+    assert result.exit_code == 1
+    assert "problems that would fail a live run" in result.output
 
 
 # --------------------------------------------------------------------------- #

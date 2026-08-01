@@ -217,17 +217,64 @@ class CodeAgentWorker:
             return PermissionResultDeny(message=reason, interrupt=False)
 
         options = ClaudeAgentOptions(
-            cwd=str(self.cwd),
-            model=node.model,
-            system_prompt=prompt,
-            allowed_tools=[*WRITE_TOOLS, *READ_TOOLS],
-            disallowed_tools=list(FORBIDDEN_TOOLS),
-            can_use_tool=can_use_tool,
-            max_turns=self.max_turns,
+            **self._option_values(node, prompt), can_use_tool=can_use_tool
         )
-        if node.effort:
-            options.effort = str(node.effort)
         return query, options
+
+    def _option_values(self, node: Node, prompt: str) -> dict[str, Any]:
+        """Every SDK option except the callback, which cannot be previewed.
+
+        Shared with `describe` so a dry run reports the configuration a live run
+        would actually use — a preview built from a second, parallel definition
+        would drift the first time either changed.
+        """
+        values: dict[str, Any] = {
+            "cwd": str(self.cwd),
+            "model": node.model,
+            "system_prompt": prompt,
+            "allowed_tools": [*WRITE_TOOLS, *READ_TOOLS],
+            "disallowed_tools": list(FORBIDDEN_TOOLS),
+            "max_turns": self.max_turns,
+        }
+        if node.effort:
+            values["effort"] = str(node.effort)
+        return values
+
+    def describe(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> dict[str, Any]:
+        """What this node would run, without running it.
+
+        Needs neither the SDK nor a credential, which matters: the configuration
+        is inspectable on a machine where the package is not installed at all.
+
+        Problems are reported rather than raised, so one dry run surfaces every
+        issue rather than stopping at the first.
+        """
+        issues: list[str] = []
+        prompt = ""
+
+        try:
+            prompt = self._prompt_for(node)
+        except WorkerError as exc:
+            issues.append(str(exc))
+        if not scope.allowed:
+            issues.append(f"node '{node.id}' declares no write_scope")
+
+        values = self._option_values(node, prompt)
+        return {
+            "worker": self.name,
+            "issues": issues,
+            "prompt": str(self._prompt_path(node)),
+            "model": values["model"] or "(inherited)",
+            "effort": values.get("effort", "(default)"),
+            "cwd": values["cwd"],
+            "max_turns": values["max_turns"],
+            "timeout_s": self.timeout_s,
+            "allowed_tools": values["allowed_tools"],
+            "disallowed_tools": values["disallowed_tools"],
+            "may_write": list(scope.allowed),
+            "frozen": list(scope.frozen),
+            "inputs": sorted(inputs),
+        }
 
     # ------------------------------------------------------------------ #
     # what the run records

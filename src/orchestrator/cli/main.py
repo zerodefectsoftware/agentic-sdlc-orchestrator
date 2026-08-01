@@ -22,7 +22,7 @@ from rich.table import Table
 from sqlalchemy import select
 
 from orchestrator.config import MissingCredential, WorkerMode, get_settings
-from orchestrator.engine.loader import PlanError, load_plan
+from orchestrator.engine.loader import PlanError, execution_order, load_plan
 from orchestrator.engine.scheduler import Scheduler
 from orchestrator.evidence import assemble, render
 from orchestrator.gates.predicates import register_all
@@ -32,7 +32,7 @@ from orchestrator.metrics import fleet_metrics, run_metrics
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
 from orchestrator.state.models import Decision, NodeStatus, Run, RunStatus
-from orchestrator.workers import LiveWorker, ReplayWorker, StubWorker
+from orchestrator.workers import LiveWorker, ReplayWorker, StubWorker, WorkScope
 from orchestrator.workers import stub as scripts
 
 app = typer.Typer(
@@ -178,9 +178,16 @@ def run(
     target: Annotated[Path, typer.Option(help="Target profile")] = Path(
         "config/target.shortener.yaml"
     ),
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what each node would dispatch, and stop")
+    ] = False,
 ) -> None:
     """Start a run and execute until it blocks, finishes, or stops."""
     loaded = load_plan(plan, write_ceiling=["target/**"])
+    if dry_run:
+        _dry_run(loaded, requirement)
+        return
+
     missing = _registry().missing(loaded.required_predicates)
     if missing:
         console.print(f"[red]refusing to start[/red] — unregistered predicates: {missing}")
@@ -194,6 +201,47 @@ def run(
         run_id = scheduler.advance(session, started).id
 
     _show(run_id)
+
+
+def _dry_run(loaded, requirement: Path) -> None:
+    """Show the configuration each node would dispatch with, and execute nothing.
+
+    Every value comes from the same functions the live path uses, so this cannot
+    describe a call the worker would not make. It needs no credential and no
+    optional package, which is the point: the configuration is inspectable on a
+    machine that cannot run it.
+    """
+    worker = LiveWorker()
+    material = {"requirement": requirement.read_text() if requirement.exists() else ""}
+    problems: list[str] = []
+
+    console.print(f"\n[bold]{loaded.name}[/bold] · dry run · nothing will execute\n")
+
+    for node_id in execution_order(loaded):
+        node = loaded.node(node_id)
+        detail = worker.describe(node, material, WorkScope.for_node(node))
+        problems.extend(f"{node.id}: {issue}" for issue in detail.pop("issues", []))
+
+        header = f"[bold]{node.id}[/bold]  [dim]{node.stage} · {node.kind}[/dim]"
+        body = "\n".join(
+            f"  {key.replace('_', ' '):<18} {_render(value)}"
+            for key, value in detail.items()
+            if value not in (None, [], "")
+        )
+        console.print(f"{header}\n{body}\n")
+
+    if problems:
+        console.print("[red]problems that would fail a live run:[/red]")
+        for problem in problems:
+            console.print(f"  - {problem}")
+        raise typer.Exit(1)
+    console.print("[green]every node has what it needs to dispatch[/green]")
+
+
+def _render(value) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    return str(value)
 
 
 @app.command()

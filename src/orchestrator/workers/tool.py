@@ -34,6 +34,9 @@ class ToolWorker:
         self.cwd = Path(cwd)
         self.timeout = timeout if timeout is not None else get_settings().tool_timeout
 
+    def describe(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> dict:
+        return describe_command(node, str(self.cwd), self.timeout)
+
     def run(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> WorkerResult:
         if node.run is None or node.run_scheme is not RunScheme.SH:
             raise WorkerError(
@@ -66,6 +69,23 @@ class ToolWorker:
             facts=observed(namespace, completed, command, duration_ms),
             duration_ms=duration_ms,
         )
+
+
+def describe_command(node: Node, cwd: str, timeout: int) -> dict:
+    """What a tool node would execute, and where its facts would land."""
+    command = node.run_target or ""
+    return {
+        "worker": "tool",
+        "issues": [] if node.run_scheme is RunScheme.SH else [
+            f"node '{node.id}' has run scheme '{node.run_scheme}'; "
+            f"the tool worker executes 'sh:' only"
+        ],
+        "command": command,
+        "cwd": cwd,
+        "timeout_s": timeout,
+        "facts": [f"{fact_namespace(command)}.{key}" for key in
+                  ("exit_code", "stdout", "stderr", "duration_ms")],
+    }
 
 
 def fact_namespace(command: str) -> str:

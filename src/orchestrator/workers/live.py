@@ -38,6 +38,13 @@ class LiveWorker:
             NodeKind.CODEAGENT: codeagent or CodeAgentWorker(),
         }
 
+    def describe(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> dict:
+        """What a node would dispatch to, without dispatching."""
+        worker = self._by_kind.get(node.kind)
+        if worker is None:
+            return {"worker": "(none)", "issues": [], "note": "handled by the scheduler"}
+        return worker.describe(node, inputs, scope)
+
     def run(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> WorkerResult:
         worker = self._by_kind.get(node.kind)
         if worker is None:

@@ -103,6 +103,46 @@ class AgentWorker:
             prompt_ref=str(self._prompt_path(node)),
         )
 
+    def describe(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> dict[str, Any]:
+        """What this node would send, without sending it.
+
+        Built from `_request` — the same function the live path uses — so a dry
+        run cannot describe a call the worker would not actually make. A preview
+        that reconstructed the configuration separately would be fiction.
+
+        Problems are reported rather than raised, so one dry run surfaces every
+        issue instead of stopping at the first.
+        """
+        issues: list[str] = []
+        schema = prompt = None
+
+        try:
+            schema = resolve_schema(node)
+        except WorkerError as exc:
+            issues.append(str(exc))
+        try:
+            prompt = self.prompt_for(node)
+        except WorkerError as exc:
+            issues.append(str(exc))
+
+        detail: dict[str, Any] = {
+            "worker": self.name,
+            "issues": issues,
+            "prompt": str(self._prompt_path(node)),
+        }
+        if schema is not None and prompt is not None:
+            request = self._request(node, schema, prompt, inputs)
+            detail |= {
+                "model": request["model"],
+                "effort": request.get("output_config", {}).get("effort", "(default)"),
+                "thinking": request["thinking"]["type"],
+                "max_tokens": request["max_tokens"],
+                "output_schema": schema.__name__,
+                "inputs": sorted(inputs),
+                "produces": [f"{node.id}.{output}" for output in (node.outputs or ["artifact"])],
+            }
+        return detail
+
     # ------------------------------------------------------------------ #
     # request construction
     # ------------------------------------------------------------------ #
