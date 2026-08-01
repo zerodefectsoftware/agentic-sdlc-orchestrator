@@ -61,13 +61,16 @@ def start_run(
     plan_version: int,
     requirement_path: str,
     target_profile: str,
-    node_ids: list[tuple[str, str]],
+    nodes: list[tuple[str, str, str]],
 ) -> Run:
     """Create a run and materialise its node executions in PENDING.
 
-    `node_ids` is a list of (node_id, kind). The run graph starts as a copy of the
-    plan's shape; nodes inserted later (fan-out children, repair nodes) are added
-    as they are materialised and flagged `inserted`.
+    `nodes` is a list of (node_id, kind, stage). The run graph starts as a copy
+    of the plan's shape; nodes inserted later (fan-out children, repair nodes) are
+    added as they are materialised and flagged `inserted`.
+
+    Stage is carried into run state so metrics can be grouped by lifecycle phase —
+    where retries concentrate is more useful than a single run-wide rate.
     """
     run = Run(
         plan_name=plan_name,
@@ -79,21 +82,25 @@ def start_run(
     session.flush()
 
     session.add_all(
-        NodeExecution(run_id=run.id, node_id=node_id, kind=kind)
-        for node_id, kind in node_ids
+        NodeExecution(run_id=run.id, node_id=node_id, kind=kind, stage=stage)
+        for node_id, kind, stage in nodes
     )
     session.flush()
     return run
 
 
-def insert_node(session: Session, run: Run, node_id: str, kind: str) -> NodeExecution:
+def insert_node(
+    session: Session, run: Run, node_id: str, kind: str, stage: str
+) -> NodeExecution:
     """Materialise a node that was not in the authored plan (§6).
 
     Fan-out children and repair nodes arrive this way. They are ordinary nodes —
     flagged only so the evidence bundle can show which parts of the run were
     planned and which were a response to what happened.
     """
-    node = NodeExecution(run_id=run.id, node_id=node_id, kind=kind, inserted=True)
+    node = NodeExecution(
+        run_id=run.id, node_id=node_id, kind=kind, stage=stage, inserted=True
+    )
     session.add(node)
     session.flush()
     return node

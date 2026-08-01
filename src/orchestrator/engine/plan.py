@@ -29,6 +29,27 @@ class NodeKind(StrEnum):
     FANOUT = "fanout"        # materialises N children from an upstream artifact
 
 
+class Stage(StrEnum):
+    """The SDLC phase a node belongs to.
+
+    Ours, not the brief's — with a documented crosswalk in §11. Two of the
+    brief's six do not survive contact with a real graph: it has no slot for
+    security work, and it implies an ordering that the test-first inversion (D5)
+    deliberately breaks.
+
+    **A stage is a label, not an ordering constraint.** `tests-acceptance` is
+    VERIFICATION work that runs before IMPLEMENTATION. Execution order comes from
+    `needs` edges; the stage says what kind of work it is.
+    """
+
+    REQUIREMENTS = "requirements"
+    DESIGN = "design"
+    IMPLEMENTATION = "implementation"
+    VERIFICATION = "verification"    # testing and security — the brief has no security slot
+    DOCUMENTATION = "documentation"
+    RELEASE = "release"
+
+
 class RunScheme(StrEnum):
     """How a `run:` target is executed.
 
@@ -142,6 +163,7 @@ class Node(BaseModel):
 
     id: str
     kind: NodeKind
+    stage: Stage
     needs: list[str] = Field(default_factory=list)
 
     # What the node consumes and produces
@@ -271,6 +293,26 @@ class Plan(BaseModel):
             if node.id == node_id:
                 return node
         raise KeyError(f"no node '{node_id}' in plan '{self.name}'")
+
+    @property
+    def stages_covered(self) -> list[Stage]:
+        """Which lifecycle stages this plan actually touches."""
+        present = {node.stage for node in self.nodes}
+        return [stage for stage in Stage if stage in present]
+
+    @property
+    def missing_stages(self) -> list[Stage]:
+        """Stages with no node.
+
+        A plan claiming to drive an SDLC that never verifies or never documents
+        has a hole; this makes it visible rather than leaving §11 to assert
+        lifecycle coverage on the plan's behalf.
+        """
+        covered = set(self.stages_covered)
+        return [stage for stage in Stage if stage not in covered]
+
+    def nodes_in(self, stage: Stage) -> list[Node]:
+        return [node for node in self.nodes if node.stage is stage]
 
     @property
     def required_predicates(self) -> list[str]:

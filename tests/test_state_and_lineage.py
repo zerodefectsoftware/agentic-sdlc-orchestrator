@@ -15,11 +15,11 @@ from orchestrator.state import store
 from orchestrator.state.models import Decision, NodeStatus, RunStatus, content_hash
 
 PLAN_NODES = [
-    ("intake", "agent"),
-    ("design", "agent"),
-    ("design-approval", "human"),
-    ("impl", "fanout"),
-    ("tests", "tool"),
+    ("intake", "agent", "requirements"),
+    ("design", "agent", "design"),
+    ("design-approval", "human", "design"),
+    ("impl", "fanout", "implementation"),
+    ("tests", "tool", "verification"),
 ]
 
 
@@ -42,7 +42,7 @@ def run(session):
         plan_version=1,
         requirement_path="requirements/greenfield.md",
         target_profile="config/target.shortener.yaml",
-        node_ids=PLAN_NODES,
+        nodes=PLAN_NODES,
     )
 
 
@@ -53,7 +53,7 @@ def run(session):
 
 def test_starting_a_run_materialises_the_plan_shape(session, run):
     assert run.status is RunStatus.RUNNING
-    assert {node.node_id for node in run.nodes} == {n for n, _ in PLAN_NODES}
+    assert {node.node_id for node in run.nodes} == {n for n, _, _ in PLAN_NODES}
     assert all(node.status is NodeStatus.PENDING for node in run.nodes)
 
 
@@ -73,7 +73,7 @@ def test_attempts_accumulate_rather_than_overwrite(session, run):
 
 def test_inserted_nodes_are_distinguishable_from_planned_ones(session, run):
     """The bundle should show which parts of a run were planned and which were a response."""
-    fix = store.insert_node(session, run, "fix:tests", "codeagent")
+    fix = store.insert_node(session, run, "fix:tests", "codeagent", "verification")
     assert fix.inserted
     assert not store.get_node(session, run, "tests").inserted
 
@@ -313,7 +313,7 @@ def test_state_survives_the_process(tmp_path):
             plan_version=1,
             requirement_path="requirements/greenfield.md",
             target_profile="config/target.shortener.yaml",
-            node_ids=PLAN_NODES,
+            nodes=PLAN_NODES,
         )
         run_id = run.id
         store.finish_run(session, run, status=RunStatus.STOPPED, stop_reason="safe stop")

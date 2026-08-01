@@ -163,7 +163,8 @@ Nothing executes outside the graph; plenty exists outside it.
 
 ```
 Node
-  id, stage
+  id
+  stage         lifecycle phase (§4.9) — a label, not an ordering constraint
   kind          one of the six node kinds (§4.7)
   inputs        artifact refs it consumes
   worker        resolved from kind + config
@@ -356,6 +357,44 @@ exercised is a claim, not a control.
 The interface must be designed in from the start. Retrofitting it once model calls are
 scattered through node implementations is painful, and the cost of adding it up front is
 close to zero.
+
+### 4.9 Stages, and the crosswalk to the brief
+
+Every node declares a **stage** — the lifecycle phase its work belongs to. Three consumers:
+lifecycle coverage becomes a check rather than a claim, metrics group by phase (where
+retries concentrate is more useful than a run-wide rate), and the evidence bundle has a
+natural table of contents.
+
+**A stage is a label, not an ordering constraint.** Execution order comes from `needs`
+edges. `tests-acceptance` is VERIFICATION work that runs *before* IMPLEMENTATION — the
+test-first inversion (D5) breaks the linear phase model on purpose, and a taxonomy that
+forbade that would be describing a different system.
+
+| Stage | Greenfield nodes |
+| --- | --- |
+| `requirements` | intake, ambiguity-triage, clarify-with-human |
+| `design` | design, design-approval |
+| `implementation` | scaffold, impl |
+| `verification` | tests-acceptance, tests, security |
+| `documentation` | docs |
+| `release` | release-readiness, accept |
+
+#### Why not the brief's six verbatim
+
+§4.4 names requirements, architecture/design, implementation, testing, documentation, and
+release readiness. Ours differs in exactly one place, and the difference is deliberate:
+
+| Brief | Ours | Note |
+| --- | --- | --- |
+| requirements | `requirements` | — |
+| architecture/design | `design` | — |
+| implementation | `implementation` | — |
+| testing | `verification` | **Renamed.** The brief has no slot for security work, and folding a security scan into "testing" would misdescribe it. `verification` covers both. |
+| documentation | `documentation` | — |
+| release readiness | `release` | — |
+
+One-to-one otherwise, so lifecycle coverage against the brief is checkable: `Plan.missing_stages`
+is empty for the greenfield plan, and a test asserts it.
 
 ---
 
@@ -667,6 +706,12 @@ Every §4.4 capability is ours. Dependencies supply mechanism — graph maths, s
 concurrency, a permission primitive — never the governed behaviour itself. That is the
 build/buy line (§2.1) applied to the graded requirements one by one.
 
+**Lifecycle coverage** — the brief's "coordinates the full SDLC lifecycle across
+requirements, architecture/design, implementation, testing, documentation, release
+readiness" — is the one item above that a document can only assert. It is now checkable:
+every node declares a stage (§4.9), `Plan.missing_stages` is empty for the greenfield plan,
+and a test says so.
+
 ---
 
 ## Appendix A — Worked plan graph
@@ -689,6 +734,7 @@ nodes:
   # ── Understand ──────────────────────────────────────────────────────────
   - id: intake
     kind: agent
+    stage: requirements
     role: analyst
     output_schema: schemas/requirement_register.json
     effort: medium                    # structured extraction; depth adds little
@@ -699,6 +745,7 @@ nodes:
 
   - id: ambiguity-triage
     kind: tool                        # policy evaluation, not a judgment call
+    stage: requirements
     needs: [intake]
     run: py:orchestrator.policy.triage_ambiguities
     escalate_when:
@@ -710,6 +757,7 @@ nodes:
 
   - id: clarify-with-human
     kind: human
+    stage: requirements
     optional: true                    # only instantiated when triage escalates
     autonomy: APPROVE
     presents: [intake.artifacts.ambiguities]
@@ -717,6 +765,7 @@ nodes:
   # ── Design ──────────────────────────────────────────────────────────────
   - id: design
     kind: agent
+    stage: design
     role: architect
     needs: [ambiguity-triage]
     outputs: [openapi, data_model, modules, decisions]
@@ -728,6 +777,7 @@ nodes:
 
   - id: design-approval
     kind: human
+    stage: design
     needs: [design]
     autonomy: APPROVE
     binds_to: [design.artifacts.openapi, design.artifacts.decisions]
@@ -737,6 +787,7 @@ nodes:
   # ── Build ───────────────────────────────────────────────────────────────
   - id: scaffold
     kind: derive                      # deterministic: models from the contract
+    stage: implementation
     needs: [design-approval]
     from: design.artifacts.openapi
     write_scope: ["target/shortener/**"]
@@ -747,6 +798,7 @@ nodes:
 
   - id: tests-acceptance
     kind: codeagent
+    stage: verification
     role: test-author                 # deliberately NOT the implementer (D5)
     needs: [scaffold]
     inputs: [intake.artifacts.acceptance_criteria]
@@ -758,6 +810,7 @@ nodes:
 
   - id: impl
     kind: fanout
+    stage: implementation
     needs: [tests-acceptance]
     from: design.artifacts.modules    # graph shape derived at runtime
     template:
@@ -772,6 +825,7 @@ nodes:
   # ── Verify (parallel, then join) ────────────────────────────────────────
   - id: tests
     kind: tool
+    stage: verification
     needs: [impl]
     run: "sh:{target.commands.test_cov}"
     freeze_paths: ["target/tests/**"]  # D6: immutable during repair
@@ -788,6 +842,7 @@ nodes:
 
   - id: docs
     kind: codeagent
+    stage: documentation
     role: technical-writer
     needs: [impl]
     effort: medium
@@ -799,6 +854,7 @@ nodes:
 
   - id: security
     kind: tool
+    stage: verification
     needs: [impl]
     run: py:orchestrator.gates.security_scan
     autonomy: REVIEW
@@ -812,6 +868,7 @@ nodes:
   # ── Release readiness ───────────────────────────────────────────────────
   - id: release-readiness
     kind: derive                      # deterministic by design (D9)
+    stage: release
     needs: [tests, docs, security]    # sync barrier — needs is the join
     run: py:orchestrator.evidence.assemble
     emits: evidence_bundle
@@ -825,6 +882,7 @@ nodes:
 
   - id: accept
     kind: human
+    stage: release
     needs: [release-readiness]
     autonomy: APPROVE
     presents: [release-readiness.artifacts.evidence_bundle]

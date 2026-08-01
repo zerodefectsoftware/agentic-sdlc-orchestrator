@@ -131,6 +131,7 @@ class NodeExecution(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
     node_id: Mapped[str] = mapped_column(String(128))
     kind: Mapped[str] = mapped_column(String(32))
+    stage: Mapped[str] = mapped_column(String(32), index=True)
     status: Mapped[NodeStatus] = mapped_column(_enum(NodeStatus), default=NodeStatus.PENDING)
     inserted: Mapped[bool] = mapped_column(default=False)  # not in the authored plan
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

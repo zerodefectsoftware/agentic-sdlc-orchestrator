@@ -29,6 +29,7 @@ from orchestrator.engine.plan import (
     NodeKind,
     PredicateCheck,
     RunScheme,
+    Stage,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -163,15 +164,63 @@ def test_escalation_also_accepts_a_bare_expression(tmp_path):
         nodes:
           - id: a
             kind: tool
+            stage: verification
             run: sh:echo
             escalate_when: "contract_diff.breaking == true"
             on_escalate: b
           - id: b
             kind: human
+            stage: release
         """,
     )
     node = load_plan(path).node("a")
     assert node.escalate_when == ExpressionCheck(expression="contract_diff.breaking == true")
+
+
+def test_the_plan_covers_every_lifecycle_stage(plan):
+    """§11 asserts lifecycle coverage; this makes the plan demonstrate it."""
+    assert plan.missing_stages == []
+    assert [s.value for s in plan.stages_covered] == [
+        "requirements",
+        "design",
+        "implementation",
+        "verification",
+        "documentation",
+        "release",
+    ]
+
+
+def test_stage_is_a_label_not_an_ordering_constraint(plan):
+    """D5 puts VERIFICATION work before IMPLEMENTATION; order comes from `needs`."""
+    order = execution_order(plan)
+    assert plan.node("tests-acceptance").stage is Stage.VERIFICATION
+    assert plan.node("impl").stage is Stage.IMPLEMENTATION
+    assert order.index("tests-acceptance") < order.index("impl")
+
+
+def test_security_is_verification_since_the_brief_has_no_slot_for_it(plan):
+    assert [n.id for n in plan.nodes_in(Stage.VERIFICATION)] == [
+        "tests-acceptance",
+        "tests",
+        "security",
+    ]
+
+
+def test_missing_stage_is_rejected(tmp_path):
+    """An unlabelled node would silently create a hole in lifecycle coverage."""
+    path = write_plan(
+        tmp_path,
+        """
+        plan: t
+        version: 1
+        nodes:
+          - id: a
+            kind: tool
+            run: sh:echo
+        """,
+    )
+    with pytest.raises(PlanError, match="stage"):
+        load_plan(path)
 
 
 def test_required_predicates_spans_gates_escalations_and_templates(plan):
@@ -227,6 +276,7 @@ MINIMAL = """
     nodes:
       - id: a
         kind: tool
+        stage: verification
         run: sh:echo
 """
 
@@ -239,8 +289,11 @@ def test_unknown_field_is_rejected(tmp_path):
 
 
 def test_unknown_dependency_is_rejected(tmp_path):
-    path = write_plan(tmp_path, MINIMAL + "      - id: b\n        kind: tool\n"
-                                          "        run: sh:echo\n        needs: [ghost]\n")
+    orphan = (
+        "      - id: b\n        kind: tool\n        stage: verification\n"
+        "        run: sh:echo\n        needs: [ghost]\n"
+    )
+    path = write_plan(tmp_path, MINIMAL + orphan)
     with pytest.raises(PlanError, match="unknown node 'ghost'"):
         load_plan(path)
 
@@ -254,10 +307,12 @@ def test_cycle_is_rejected(tmp_path):
         nodes:
           - id: a
             kind: tool
+            stage: verification
             run: sh:echo
             needs: [b]
           - id: b
             kind: tool
+            stage: verification
             run: sh:echo
             needs: [a]
         """,
@@ -267,7 +322,9 @@ def test_cycle_is_rejected(tmp_path):
 
 
 def test_duplicate_ids_are_rejected(tmp_path):
-    duplicate = "      - id: a\n        kind: tool\n        run: sh:echo\n"
+    duplicate = (
+        "      - id: a\n        kind: tool\n        stage: verification\n        run: sh:echo\n"
+    )
     path = write_plan(tmp_path, MINIMAL + duplicate)
     with pytest.raises(PlanError, match="duplicate node ids: a"):
         load_plan(path)
@@ -276,11 +333,18 @@ def test_duplicate_ids_are_rejected(tmp_path):
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
-        ("      - id: x\n        kind: agent\n", "requires 'role'"),
-        ("      - id: x\n        kind: tool\n", "requires 'run'"),
-        ("      - id: x\n        kind: fanout\n", "requires 'from'"),
-        ("      - id: x\n        kind: codeagent\n        role: r\n", "requires 'write_scope'"),
-        ("      - id: x\n        kind: derive\n", "requires 'from' or 'run'"),
+        ("      - id: x\n        kind: agent\n        stage: implementation\n", "requires 'role'"),
+        ("      - id: x\n        kind: tool\n        stage: implementation\n", "requires 'run'"),
+        ("      - id: x\n        kind: fanout\n        stage: implementation\n", "requires 'from'"),
+        (
+            "      - id: x\n        kind: codeagent\n        stage: implementation\n"
+            "        role: r\n",
+            "requires 'write_scope'",
+        ),
+        (
+            "      - id: x\n        kind: derive\n        stage: implementation\n",
+            "requires 'from' or 'run'",
+        ),
     ],
 )
 def test_kind_specific_requirements_are_enforced(tmp_path, body, expected):
@@ -298,6 +362,7 @@ def test_unprefixed_run_is_rejected(tmp_path):
         nodes:
           - id: a
             kind: tool
+            stage: verification
             run: orchestrator.gates.security_scan
         """,
     )
@@ -306,9 +371,10 @@ def test_unprefixed_run_is_rejected(tmp_path):
 
 
 def test_human_node_cannot_be_auto(tmp_path):
-    path = write_plan(
-        tmp_path, MINIMAL + "      - id: x\n        kind: human\n        autonomy: AUTO\n"
+    auto_human = (
+        "      - id: x\n        kind: human\n        stage: release\n        autonomy: AUTO\n"
     )
+    path = write_plan(tmp_path, MINIMAL + auto_human)
     with pytest.raises(PlanError, match="only APPROVE is meaningful"):
         load_plan(path)
 
@@ -330,6 +396,7 @@ def test_write_scope_outside_the_ceiling_is_rejected(tmp_path):
         nodes:
           - id: a
             kind: codeagent
+            stage: implementation
             role: r
             write_scope: ["src/orchestrator/**"]
         """,

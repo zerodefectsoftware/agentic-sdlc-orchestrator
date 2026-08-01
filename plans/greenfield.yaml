@@ -18,6 +18,7 @@ nodes:
   # ── Understand ──────────────────────────────────────────────────────────
   - id: intake
     kind: agent
+    stage: requirements
     role: analyst
     output_schema: schemas/requirement_register.json
     effort: medium                    # structured extraction; depth adds little
@@ -28,6 +29,7 @@ nodes:
 
   - id: ambiguity-triage
     kind: tool                        # policy evaluation, not a judgment call
+    stage: requirements
     needs: [intake]
     run: py:orchestrator.policy.triage_ambiguities
     escalate_when:
@@ -39,6 +41,7 @@ nodes:
 
   - id: clarify-with-human
     kind: human
+    stage: requirements
     optional: true                    # only instantiated when triage escalates
     autonomy: APPROVE
     presents: [intake.artifacts.ambiguities]
@@ -46,6 +49,7 @@ nodes:
   # ── Design ──────────────────────────────────────────────────────────────
   - id: design
     kind: agent
+    stage: design
     role: architect
     needs: [ambiguity-triage]
     outputs: [openapi, data_model, modules, decisions]
@@ -57,6 +61,7 @@ nodes:
 
   - id: design-approval
     kind: human
+    stage: design
     needs: [design]
     autonomy: APPROVE
     binds_to: [design.artifacts.openapi, design.artifacts.decisions]
@@ -66,6 +71,7 @@ nodes:
   # ── Build ───────────────────────────────────────────────────────────────
   - id: scaffold
     kind: derive                      # deterministic: models from the contract
+    stage: implementation
     needs: [design-approval]
     from: design.artifacts.openapi
     write_scope: ["target/shortener/**"]
@@ -76,6 +82,7 @@ nodes:
 
   - id: tests-acceptance
     kind: codeagent
+    stage: verification
     role: test-author                 # deliberately NOT the implementer (D5)
     needs: [scaffold]
     inputs: [intake.artifacts.acceptance_criteria]
@@ -87,6 +94,7 @@ nodes:
 
   - id: impl
     kind: fanout
+    stage: implementation
     needs: [tests-acceptance]
     from: design.artifacts.modules    # graph shape derived at runtime
     template:
@@ -101,6 +109,7 @@ nodes:
   # ── Verify (parallel, then join) ────────────────────────────────────────
   - id: tests
     kind: tool
+    stage: verification
     needs: [impl]
     run: "sh:{target.commands.test_cov}"
     freeze_paths: ["target/tests/**"]  # D6: immutable during repair
@@ -117,6 +126,7 @@ nodes:
 
   - id: docs
     kind: codeagent
+    stage: documentation
     role: technical-writer
     needs: [impl]
     effort: medium
@@ -128,6 +138,7 @@ nodes:
 
   - id: security
     kind: tool
+    stage: verification
     needs: [impl]
     run: py:orchestrator.gates.security_scan
     autonomy: REVIEW
@@ -141,6 +152,7 @@ nodes:
   # ── Release readiness ───────────────────────────────────────────────────
   - id: release-readiness
     kind: derive                      # deterministic by design (D9)
+    stage: release
     needs: [tests, docs, security]    # sync barrier — needs is the join
     run: py:orchestrator.evidence.assemble
     emits: evidence_bundle
@@ -154,6 +166,7 @@ nodes:
 
   - id: accept
     kind: human
+    stage: release
     needs: [release-readiness]
     autonomy: APPROVE
     presents: [release-readiness.artifacts.evidence_bundle]
