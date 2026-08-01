@@ -106,6 +106,22 @@ def insert_node(
     return node
 
 
+def all_nodes(session: Session, run: Run) -> list[NodeExecution]:
+    """Every node in the run, including ones inserted after it started.
+
+    Queried rather than read from `run.nodes`: that relationship can be stale
+    within a session, and a scheduler that cannot see the fix node it just
+    inserted will never dispatch it — the node stays PENDING and the run wedges.
+    """
+    return list(
+        session.scalars(
+            select(NodeExecution)
+            .where(NodeExecution.run_id == run.id)
+            .order_by(NodeExecution.created_at)
+        )
+    )
+
+
 def get_node(session: Session, run: Run, node_id: str) -> NodeExecution | None:
     return session.scalar(
         select(NodeExecution).where(
