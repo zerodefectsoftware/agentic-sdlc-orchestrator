@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -105,6 +106,28 @@ class ScopeGuard:
         return True, ""
 
 
+def _refuse_if_guard_was_shadowed(node: Node, raised: list) -> None:
+    """Stop the run if the SDK reports that the permission callback was skipped.
+
+    The SDK says so out loud — `CanUseToolShadowedWarning` — and a warning on
+    stderr is not a control. A scoped agent whose scope silently did not apply
+    is worse than an unscoped one, because the evidence bundle would record a
+    blast radius that was never enforced. So this is an ERROR: the work may have
+    happened, but nothing about it can be trusted, and D7 is a claim the run can
+    no longer make.
+    """
+    shadowed = [
+        str(warning.message)
+        for warning in raised
+        if "CanUseToolShadowed" in type(warning.message).__name__
+    ]
+    if shadowed:
+        raise WorkerError(
+            f"the scope guard for '{node.id}' was bypassed by the tool "
+            f"configuration — refusing to trust this session. {shadowed[0]}"
+        )
+
+
 async def _streamed(text: str):
     """The one-message streaming form the permission callback requires."""
     yield {
@@ -155,11 +178,14 @@ class CodeAgentWorker:
         prompt = self._prompt_for(node)
 
         try:
-            outcome = asyncio.run(
-                asyncio.wait_for(
-                    self._converse(node, prompt, inputs, guard), timeout=self.timeout_s
+            with warnings.catch_warnings(record=True) as raised:
+                warnings.simplefilter("always")
+                outcome = asyncio.run(
+                    asyncio.wait_for(
+                        self._converse(node, prompt, inputs, guard), timeout=self.timeout_s
+                    )
                 )
-            )
+            _refuse_if_guard_was_shadowed(node, raised)
         except TimeoutError as exc:
             raise WorkerError(
                 f"'{node.id}' exceeded {self.timeout_s}s. An unbounded agent loop has "
@@ -250,7 +276,12 @@ class CodeAgentWorker:
             "cwd": str(self.cwd),
             "model": node.model,
             "system_prompt": prompt,
-            "allowed_tools": [*WRITE_TOOLS, *READ_TOOLS],
+            # Reads only. A tool named here is auto-approved *before* the
+            # permission callback is consulted, so listing the write tools would
+            # hand the agent a scope guard that never runs — the enforcement in
+            # this file would read as enforced and do nothing. Writes are left
+            # unlisted so every one of them falls through to `can_use_tool`.
+            "allowed_tools": list(READ_TOOLS),
             "disallowed_tools": list(FORBIDDEN_TOOLS),
             "max_turns": self.max_turns,
         }

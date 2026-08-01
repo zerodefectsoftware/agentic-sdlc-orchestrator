@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ from orchestrator.gates.facts import FactSource
 from orchestrator.workers import WorkerError, WorkScope
 from orchestrator.workers.codeagent import (
     FORBIDDEN_TOOLS,
+    READ_TOOLS,
+    WRITE_TOOLS,
     CodeAgentWorker,
     ScopeGuard,
 )
@@ -281,3 +284,52 @@ def test_the_prompt_is_streamed_because_the_scope_guard_requires_it(prompts):
 
 async def _drain(stream) -> list[dict]:
     return [message async for message in stream]
+
+
+def test_write_tools_are_not_auto_approved_ahead_of_the_guard(prompts):
+    """The hole the SDK reported on the first live session.
+
+    A tool listed in `allowed_tools` is approved *before* `can_use_tool` runs,
+    so listing the write tools handed the agent a scope guard that never
+    executed — D7 enforcement reading as enforced while doing nothing.
+    """
+    captured = {}
+
+    def build(node, prompt, guard):
+        async def query(*, prompt, options):
+            captured["options"] = options
+            yield ResultMessage()
+
+        return query, {"allowed_tools": list(READ_TOOLS)}
+
+    detail = worker(build, prompts).describe(node(), {}, scope())
+
+    assert set(detail["allowed_tools"]) == set(READ_TOOLS)
+    assert not set(detail["allowed_tools"]) & set(WRITE_TOOLS)
+    assert set(detail["disallowed_tools"]) == set(FORBIDDEN_TOOLS)
+
+
+def test_a_shadowed_guard_stops_the_run(prompts):
+    """A warning on stderr is not a control.
+
+    A scoped agent whose scope silently did not apply is worse than an unscoped
+    one: the evidence bundle would record a blast radius nobody enforced.
+    """
+
+    class CanUseToolShadowedWarning(UserWarning):
+        pass
+
+    def build(node, prompt, guard):
+        async def query(*, prompt, options):
+            warnings.warn(
+                "can_use_tool will not be invoked for: Write",
+                CanUseToolShadowedWarning,
+                stacklevel=1,
+            )
+            guard.decide("Write", {"file_path": "target/shortener/api/x.py"})
+            yield ResultMessage()
+
+        return query, {}
+
+    with pytest.raises(WorkerError, match="scope guard .* was bypassed"):
+        worker(build, prompts).run(node(), {}, scope())
