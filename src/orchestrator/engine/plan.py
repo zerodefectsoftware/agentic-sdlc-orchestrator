@@ -1,7 +1,7 @@
 """Plan graph data model.
 
 The plan is authored data (D16); this module is its schema. Everything here
-mirrors the node contract in docs/architecture.md §4.1 and the seven node kinds
+mirrors the node contract in docs/architecture.md §4.1 and the six node kinds
 in §4.7 — if the two disagree, the doc is wrong and should be corrected.
 
 `extra="forbid"` throughout is deliberate: a typo in a plan file should fail at
@@ -27,7 +27,6 @@ class NodeKind(StrEnum):
     DERIVE = "derive"        # deterministic generation from a contract
     HUMAN = "human"          # approval or clarification checkpoint
     FANOUT = "fanout"        # materialises N children from an upstream artifact
-    JOIN = "join"            # explicit synchronisation barrier
 
 
 class Autonomy(StrEnum):

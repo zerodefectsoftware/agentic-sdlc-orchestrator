@@ -139,7 +139,7 @@ nodes:
   # ── Release readiness ───────────────────────────────────────────────────
   - id: release-readiness
     kind: derive                      # deterministic by design (D9)
-    needs: [tests, docs, security]    # join / sync barrier
+    needs: [tests, docs, security]    # sync barrier — needs is the join
     run: orchestrator.evidence.assemble
     emits: evidence_bundle
     gate:                             # G10

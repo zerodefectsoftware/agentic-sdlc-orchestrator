@@ -8,7 +8,7 @@ orchestrator produces is under `target/` or `runs/`.**
 
 ```
 src/orchestrator/     the deliverable — control plane (ours, human-written)
-  engine/             scheduler, plan loading, node-kind dispatch, fan-out/join
+  engine/             scheduler, plan loading, node-kind dispatch, fan-out
   gates/              expression evaluation + registered predicates
   policy/             autonomy classes, escalation, write-scope resolution
   workers/            Worker interface (D18): live / replay / stub

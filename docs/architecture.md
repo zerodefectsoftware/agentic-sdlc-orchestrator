@@ -164,7 +164,7 @@ Nothing executes outside the graph; plenty exists outside it.
 ```
 Node
   id, stage
-  kind          one of the seven node kinds (§4.7)
+  kind          one of the six node kinds (§4.7)
   inputs        artifact refs it consumes
   worker        resolved from kind + config
   outputs       artifact refs it must produce (schema-constrained)
@@ -273,9 +273,8 @@ document that composes them. Adding a stage is an edit to data, not to the sched
 | `derive` | Generation from a contract (models from OpenAPI, docs from schema) | Deterministic |
 | `human` | Approval or clarification checkpoint | Authoritative |
 | `fanout` | Materializes N children from an upstream artifact | Structural |
-| `join` | Synchronization barrier | Structural |
 
-Seven kinds cover the entire greenfield graph. The brownfield additions —
+Six kinds cover the entire greenfield graph. The brownfield additions —
 `impact-analysis`, `baseline-capture` — introduce **no new kinds**; they are new YAML
 entries composing existing ones. That is the test of whether the factoring is right.
 
@@ -571,7 +570,7 @@ claimed.
 | ID | Decision | Rationale | Cost accepted |
 | --- | --- | --- | --- |
 | **D1** | No orchestration framework; hand-rolled engine over `asyncio`. Alternatives evaluated below | Orchestration is the graded artifact; a framework supplies ~40% (state, checkpointing, interrupts) but obscures which design is ours. Gates, policy, lineage, invalidation — the other 60% — must be built regardless | We own the scheduler and its bugs |
-| **D16** | The plan graph is declarative YAML over seven node kinds (§4.7); the engine is fixed | Extension without engine change — new stages, gates, and scenarios are configuration. Keeps the engine small and makes the SDLC readable from one file | A declarative DSL has an expressiveness ceiling; dynamic fan-out needs an explicit construct |
+| **D16** | The plan graph is declarative YAML over six node kinds (§4.7); the engine is fixed | Extension without engine change — new stages, gates, and scenarios are configuration. Keeps the engine small and makes the SDLC readable from one file | A declarative DSL has an expressiveness ceiling; dynamic fan-out needs an explicit construct |
 | **D17** | **Build what's graded, buy what isn't.** Hand-roll the control plane; use existing libraries for worker runtimes, agent harnesses, and every non-graded capability | §4.4 is a list of control-plane properties — that is the differentiator. Reimplementing file/bash tooling, permission layers, and agent loops is a week of undifferentiated work that would consume the time the graded part needs | A dependency on the agent harness's permission model; D6/D7 enforcement is only as good as what it exposes |
 | **D18** | One `Worker` interface behind every node kind, with live / replay / stub implementations | The only way to test a scheduler whose workers are non-deterministic; also makes runs reproducible and the runtime choice swappable (§4.8) | Recorded fixtures drift from real model behaviour and need periodic refresh |
 | **D2** | SQLite backs orchestration state, not just target data | Safe-stop resumability and reliability metrics need durable, queryable run state | Single-node only |
@@ -802,7 +801,7 @@ nodes:
   # ── Release readiness ───────────────────────────────────────────────────
   - id: release-readiness
     kind: derive                      # deterministic by design (D9)
-    needs: [tests, docs, security]    # join / sync barrier
+    needs: [tests, docs, security]    # sync barrier — needs is the join
     run: orchestrator.evidence.assemble
     emits: evidence_bundle
     gate:                             # G10

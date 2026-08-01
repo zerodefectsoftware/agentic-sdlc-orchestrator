@@ -1,1 +1,1 @@
-"""Scheduler, plan-graph loading, node-kind dispatch, fan-out and join."""
+"""Scheduler, plan-graph loading, node-kind dispatch, fan-out and synchronisation."""
