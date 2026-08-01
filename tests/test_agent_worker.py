@@ -266,22 +266,6 @@ def test_the_agent_worker_refuses_a_codeagent_node(prompts):
         worker(FakeResponse(REGISTER), prompts).run(node, {}, SCOPE)
 
 
-def test_codeagent_is_unimplemented_rather_than_faked():
-    """A permission boundary that looks enforced and is not would be worse than
-    an honest gap (D6, D7, D17)."""
-    node = Node.model_validate(
-        {
-            "id": "impl",
-            "kind": "codeagent",
-            "stage": "implementation",
-            "role": "implementer",
-            "write_scope": ["target/**"],
-        }
-    )
-    with pytest.raises(WorkerError, match="ORCHESTRATOR_WORKER=replay"):
-        LiveWorker().run(node, {}, SCOPE)
-
-
 # --------------------------------------------------------------------------- #
 # dispatch
 # --------------------------------------------------------------------------- #

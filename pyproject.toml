@@ -17,6 +17,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Only needed to execute codeagent nodes against real models. The package
+# bundles the Claude Code CLI, so it is kept out of the core install: stub and
+# replay runs — including the whole test suite — never import it.
+live = [
+    "claude-agent-sdk>=0.1",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

@@ -11,10 +11,9 @@ shape — not `AGENT`-sourced, which would be the model vouching for itself and
 inadmissible under D4. The distinction is narrow and load-bearing: *the artifact
 is the subject of the check, never its author.*
 
-`codeagent` nodes are **not** handled here. They need file tools, a permission
-layer, and an agent loop — the Claude Agent SDK — and stubbing that with a few
-hand-rolled tool calls would contradict D17 and produce a worse version of
-something already built. See `CodeAgentWorker` below for the boundary.
+`codeagent` nodes are handled by `workers.codeagent`, which needs file tools, a
+permission layer, and an agent loop — the Claude Agent SDK. Keeping them apart
+keeps this module free of any filesystem concern at all.
 """
 
 from __future__ import annotations
@@ -157,29 +156,6 @@ class AgentWorker:
                 if value is not None:
                     facts[f"{node.id}.{field}"] = Fact(value, FactSource.TOOL, "anthropic")
         return facts
-
-
-class CodeAgentWorker:
-    """Not implemented — the boundary is deliberate.
-
-    A `codeagent` node needs an agent loop with file tools and a permission layer
-    that can enforce `write_scope` and `freeze_paths`. That is the Claude Agent
-    SDK's job (D17: build what's graded, buy what isn't), and D6/D7 are only real
-    if the runtime *enforces* them rather than the plan merely declaring them.
-
-    Hand-rolling a few tool calls here would produce a worse version of something
-    that already exists, and — worse — a permission boundary that looks enforced
-    and is not.
-    """
-
-    name = "codeagent"
-
-    def run(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> WorkerResult:
-        raise WorkerError(
-            f"'{node.id}' is a codeagent node, which needs the Claude Agent SDK for its "
-            f"file tools and permission layer. Not yet integrated — run with "
-            f"ORCHESTRATOR_WORKER=replay, or use stub to walk the graph's shape."
-        )
 
 
 # --------------------------------------------------------------------------- #

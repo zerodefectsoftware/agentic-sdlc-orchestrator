@@ -13,8 +13,9 @@ otherwise would hide the gap.
 from __future__ import annotations
 
 from orchestrator.engine.plan import Node, NodeKind
-from orchestrator.workers.agent import AgentWorker, CodeAgentWorker
+from orchestrator.workers.agent import AgentWorker
 from orchestrator.workers.base import Worker, WorkerError, WorkerResult, WorkInputs, WorkScope
+from orchestrator.workers.codeagent import CodeAgentWorker
 from orchestrator.workers.tool import ToolWorker
 
 
