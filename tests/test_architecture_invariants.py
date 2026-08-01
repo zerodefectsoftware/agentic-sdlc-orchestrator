@@ -56,6 +56,35 @@ def test_plan_node_ids_are_unique_and_dependencies_resolve():
                 assert dep in ids, f"{path.name}: {node['id']} needs unknown '{dep}'"
 
 
+def test_appendix_a_matches_the_real_plan_file():
+    """The doc quotes the plan in full; a quote that drifts is worse than no quote.
+
+    Compared semantically rather than textually, so comment and whitespace edits
+    in either copy are fine — only a difference in what the plan *says* fails.
+    """
+    doc = (REPO / "docs" / "architecture.md").read_text()
+    blocks = re.findall(r"```yaml\n(plan: greenfield\n.*?)\n```", doc, re.S)
+    assert len(blocks) == 1, "expected exactly one greenfield plan block in the doc"
+
+    documented = yaml.safe_load(blocks[0])
+    actual = yaml.safe_load((REPO / "plans" / "greenfield.yaml").read_text())
+    assert documented == actual, (
+        "docs/architecture.md Appendix A has drifted from plans/greenfield.yaml"
+    )
+
+
+def test_run_targets_declare_their_execution_scheme():
+    """`run:` covers both Python callables and shell commands; guessing is a bug."""
+    for path in sorted((REPO / "plans").glob("*.yaml")):
+        plan = yaml.safe_load(path.read_text())
+        for node in plan.get("nodes") or []:
+            run = node.get("run")
+            if run is not None:
+                assert run.startswith(("py:", "sh:")), (
+                    f"{path.name}: {node['id']} has unprefixed run: {run!r}"
+                )
+
+
 def test_write_scopes_stay_inside_the_target():
     """No node may write outside the target tree.
 

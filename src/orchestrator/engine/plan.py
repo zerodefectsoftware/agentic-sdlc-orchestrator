@@ -29,6 +29,18 @@ class NodeKind(StrEnum):
     FANOUT = "fanout"        # materialises N children from an upstream artifact
 
 
+class RunScheme(StrEnum):
+    """How a `run:` target is executed.
+
+    `run` covers two different execution models, and guessing between them at
+    dispatch time is how a shell command that happens to look like a module path
+    produces a baffling failure. The scheme is therefore explicit.
+    """
+
+    PY = "py"  # an importable callable, e.g. py:orchestrator.evidence.assemble
+    SH = "sh"  # a shell command, e.g. sh:{target.commands.test_cov}
+
+
 class Autonomy(StrEnum):
     AUTO = "AUTO"            # proceeds; result gated and logged
     REVIEW = "REVIEW"        # proceeds; flagged for attention, non-blocking
@@ -194,12 +206,29 @@ class Node(BaseModel):
             raise ValueError(
                 f"node '{self.id}' declares 'on_escalate' without 'escalate_when'"
             )
+
+        if self.run is not None:
+            schemes = tuple(f"{scheme}:" for scheme in RunScheme)
+            if not self.run.startswith(schemes):
+                raise ValueError(
+                    f"node '{self.id}': run must name its scheme — "
+                    f"{' or '.join(schemes)} — got {self.run!r}"
+                )
         return self
 
     @property
     def is_model_backed(self) -> bool:
         """Only these kinds consume model tokens — see §4.7."""
         return self.kind in (NodeKind.AGENT, NodeKind.CODEAGENT)
+
+    @property
+    def run_scheme(self) -> RunScheme | None:
+        return RunScheme(self.run.split(":", 1)[0]) if self.run else None
+
+    @property
+    def run_target(self) -> str | None:
+        """The command or dotted path, with the scheme stripped."""
+        return self.run.split(":", 1)[1] if self.run else None
 
 
 class Defaults(BaseModel):

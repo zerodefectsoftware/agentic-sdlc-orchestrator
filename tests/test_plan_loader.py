@@ -22,7 +22,14 @@ from orchestrator.engine.loader import (
     execution_order,
     load_plan,
 )
-from orchestrator.engine.plan import Autonomy, Effort, ExpressionCheck, NodeKind, PredicateCheck
+from orchestrator.engine.plan import (
+    Autonomy,
+    Effort,
+    ExpressionCheck,
+    NodeKind,
+    PredicateCheck,
+    RunScheme,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 GREENFIELD = REPO / "plans" / "greenfield.yaml"
@@ -136,6 +143,17 @@ def test_repair_policy_is_bounded(plan):
     assert policy.then == "escalate"
 
 
+def test_run_scheme_separates_python_callables_from_shell_commands(plan):
+    """Guessing between the two at dispatch time is how baffling failures happen."""
+    security = plan.node("security")
+    assert security.run_scheme is RunScheme.PY
+    assert security.run_target == "orchestrator.gates.security_scan"
+
+    tests = plan.node("tests")
+    assert tests.run_scheme is RunScheme.SH
+    assert tests.run_target == "{target.commands.test_cov}"
+
+
 # --------------------------------------------------------------------------- #
 # defaults
 # --------------------------------------------------------------------------- #
@@ -170,7 +188,7 @@ MINIMAL = """
     nodes:
       - id: a
         kind: tool
-        run: echo
+        run: sh:echo
 """
 
 
@@ -183,7 +201,7 @@ def test_unknown_field_is_rejected(tmp_path):
 
 def test_unknown_dependency_is_rejected(tmp_path):
     path = write_plan(tmp_path, MINIMAL + "      - id: b\n        kind: tool\n"
-                                          "        run: echo\n        needs: [ghost]\n")
+                                          "        run: sh:echo\n        needs: [ghost]\n")
     with pytest.raises(PlanError, match="unknown node 'ghost'"):
         load_plan(path)
 
@@ -197,11 +215,11 @@ def test_cycle_is_rejected(tmp_path):
         nodes:
           - id: a
             kind: tool
-            run: echo
+            run: sh:echo
             needs: [b]
           - id: b
             kind: tool
-            run: echo
+            run: sh:echo
             needs: [a]
         """,
     )
@@ -210,7 +228,8 @@ def test_cycle_is_rejected(tmp_path):
 
 
 def test_duplicate_ids_are_rejected(tmp_path):
-    path = write_plan(tmp_path, MINIMAL + "      - id: a\n        kind: tool\n        run: echo\n")
+    duplicate = "      - id: a\n        kind: tool\n        run: sh:echo\n"
+    path = write_plan(tmp_path, MINIMAL + duplicate)
     with pytest.raises(PlanError, match="duplicate node ids: a"):
         load_plan(path)
 
@@ -228,6 +247,23 @@ def test_duplicate_ids_are_rejected(tmp_path):
 def test_kind_specific_requirements_are_enforced(tmp_path, body, expected):
     with pytest.raises(PlanError, match=expected):
         load_plan(write_plan(tmp_path, MINIMAL + body))
+
+
+def test_unprefixed_run_is_rejected(tmp_path):
+    """A shell command that looks like a module path must not be guessable."""
+    path = write_plan(
+        tmp_path,
+        """
+        plan: t
+        version: 1
+        nodes:
+          - id: a
+            kind: tool
+            run: orchestrator.gates.security_scan
+        """,
+    )
+    with pytest.raises(PlanError, match="must name its scheme"):
+        load_plan(path)
 
 
 def test_human_node_cannot_be_auto(tmp_path):

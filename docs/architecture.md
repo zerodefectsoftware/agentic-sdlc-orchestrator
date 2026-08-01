@@ -274,6 +274,15 @@ document that composes them. Adding a stage is an edit to data, not to the sched
 | `human` | Approval or clarification checkpoint | Authoritative |
 | `fanout` | Materializes N children from an upstream artifact | Structural |
 
+**`run:` names its execution scheme.** The `tool` and `derive` kinds cover two different
+execution models, and deciding between them by asking "does this string import?" is how a
+shell command that happens to look like a module path produces a baffling failure:
+
+```yaml
+run: "py:orchestrator.evidence.assemble"    # an importable callable
+run: "sh:{target.commands.test_cov}"        # a shell command from the target profile
+```
+
 Six kinds cover the entire greenfield graph. The brownfield additions —
 `impact-analysis`, `baseline-capture` — introduce **no new kinds**; they are new YAML
 entries composing existing ones. That is the test of whether the factoring is right.
@@ -691,7 +700,7 @@ nodes:
   - id: ambiguity-triage
     kind: tool                        # policy evaluation, not a judgment call
     needs: [intake]
-    run: orchestrator.policy.triage_ambiguities
+    run: py:orchestrator.policy.triage_ambiguities
     escalate_when: "any(ambiguities, severity >= HIGH)"
     on_escalate: clarify-with-human
     gate:                             # G2
@@ -729,7 +738,7 @@ nodes:
     kind: derive                      # deterministic: models from the contract
     needs: [design-approval]
     from: design.artifacts.openapi
-    write_scope: ["src/shortener/**"]
+    write_scope: ["target/shortener/**"]
     gate:                             # G4
       all:
         - "imports.resolve == true"
@@ -740,7 +749,7 @@ nodes:
     role: test-author                 # deliberately NOT the implementer (D5)
     needs: [scaffold]
     inputs: [intake.artifacts.acceptance_criteria]
-    write_scope: ["tests/**"]
+    write_scope: ["target/tests/**"]
     gate:                             # G5 — the RED gate
       all:
         - "pytest.exit_code != 0"     # must FAIL against the scaffold
@@ -753,7 +762,7 @@ nodes:
     template:
       kind: codeagent
       role: implementer
-      write_scope: ["src/shortener/{item.path}/**"]   # D7 blast radius
+      write_scope: ["target/shortener/{item.path}/**"]   # D7 blast radius
       gate:                           # G6, per module
         all:
           - "ruff.exit_code == 0"
@@ -763,12 +772,12 @@ nodes:
   - id: tests
     kind: tool
     needs: [impl]
-    run: "{target.test_cmd} --cov=src --cov-report=json"
-    freeze_paths: ["tests/**"]        # D6: immutable during repair
-    gate:                             # G7 — the GREEN gate
+    run: "sh:{target.commands.test_cov}"
+    freeze_paths: ["target/tests/**"]  # D6: immutable during repair
+    gate:                              # G7 — the GREEN gate
       all:
         - "pytest.exit_code == 0"
-        - "coverage.percent >= 80"
+        - "coverage.percent >= {target.thresholds.coverage_min}"
         - predicate: ac_test_matrix_complete
     on_fail:
       insert: fix
@@ -781,7 +790,7 @@ nodes:
     role: technical-writer
     needs: [impl]
     effort: medium
-    write_scope: ["README.md", "docs/**"]
+    write_scope: ["target/README.md", "target/docs/**"]
     gate:                             # G8 — executable documentation
       all:
         - predicate: setup_steps_execute_in_clean_venv
@@ -790,7 +799,7 @@ nodes:
   - id: security
     kind: tool
     needs: [impl]
-    run: orchestrator.gates.security_scan
+    run: py:orchestrator.gates.security_scan
     autonomy: REVIEW
     escalate_when: "any(findings, severity >= HIGH)"   # policy overrides default
     may_waive: false                  # D15: agents never waive findings
@@ -802,7 +811,7 @@ nodes:
   - id: release-readiness
     kind: derive                      # deterministic by design (D9)
     needs: [tests, docs, security]    # sync barrier — needs is the join
-    run: orchestrator.evidence.assemble
+    run: py:orchestrator.evidence.assemble
     emits: evidence_bundle
     gate:                             # G10
       all:
@@ -845,7 +854,7 @@ insert_after:
 
     - id: baseline-capture
       kind: tool
-      run: orchestrator.workers.snapshot_tree
+      run: py:orchestrator.workers.snapshot_tree
       gate:
         all:
           - "pytest.exit_code == 0"       # refuse to start from a red baseline

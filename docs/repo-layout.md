@@ -12,7 +12,8 @@ src/orchestrator/     the deliverable — control plane (ours, human-written)
   gates/              expression evaluation + registered predicates
   policy/             autonomy classes, escalation, write-scope resolution
   workers/            Worker interface (D18): live / replay / stub
-  lineage/            causal record of artifacts and decisions
+  lineage/            causal record of artifacts and decisions (write path)
+  evidence/           assembles the reviewable bundle from recorded facts (read path)
   state/              durable run state (SQLAlchemy)
   metrics/            success rate, retry/rollback frequency, MTTR, latency
   cli/                run, status, approve, metrics, replay

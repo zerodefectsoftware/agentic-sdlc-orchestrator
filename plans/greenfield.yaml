@@ -29,7 +29,7 @@ nodes:
   - id: ambiguity-triage
     kind: tool                        # policy evaluation, not a judgment call
     needs: [intake]
-    run: orchestrator.policy.triage_ambiguities
+    run: py:orchestrator.policy.triage_ambiguities
     escalate_when: "any(ambiguities, severity >= HIGH)"
     on_escalate: clarify-with-human
     gate:                             # G2
@@ -101,7 +101,7 @@ nodes:
   - id: tests
     kind: tool
     needs: [impl]
-    run: "{target.commands.test_cov}"
+    run: "sh:{target.commands.test_cov}"
     freeze_paths: ["target/tests/**"]  # D6: immutable during repair
     gate:                              # G7 — the GREEN gate
       all:
@@ -128,7 +128,7 @@ nodes:
   - id: security
     kind: tool
     needs: [impl]
-    run: orchestrator.gates.security_scan
+    run: py:orchestrator.gates.security_scan
     autonomy: REVIEW
     escalate_when: "any(findings, severity >= HIGH)"   # policy overrides default
     may_waive: false                  # D15: agents never waive findings
@@ -140,7 +140,7 @@ nodes:
   - id: release-readiness
     kind: derive                      # deterministic by design (D9)
     needs: [tests, docs, security]    # sync barrier — needs is the join
-    run: orchestrator.evidence.assemble
+    run: py:orchestrator.evidence.assemble
     emits: evidence_bundle
     gate:                             # G10
       all:
