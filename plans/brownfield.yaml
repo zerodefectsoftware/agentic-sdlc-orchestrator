@@ -95,8 +95,9 @@ override:
     inputs: [impact-analysis.artifacts.report]
     output_schema: schemas/design.json
     outputs: [spec, modules]
-    gate:                               # G3, unchanged
+    gate:                               # G3
       all:
+        - predicate: contract_is_valid
         - predicate: requirement_design_matrix_complete
         - predicate: no_unmapped_design_elements
 
@@ -122,7 +123,9 @@ override:
     needs: [design-approval]
     inputs: [intake.artifacts.register, impact-analysis.artifacts.report]
     outputs: [suite]
-    write_scope: ["target/tests/**"]
+    write_scope: ["{target.tests_root}/**"]
+    verify:
+      - "sh:{target.commands.test}"     # a code agent cannot report its own red
     gate:                               # G5 — the RED gate
       all:
         - "pytest.exit_code != 0"
@@ -140,6 +143,8 @@ override:
       kind: codeagent
       role: implementer
       write_scope: ["{target.root}/{item.path}/**"]
+      verify:
+        - "sh:{target.commands.lint}"
       gate:                             # G6, per module
         all:
           - "ruff.exit_code == 0"

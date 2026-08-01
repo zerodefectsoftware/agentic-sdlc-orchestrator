@@ -48,6 +48,7 @@ from orchestrator.state.models import Artifact, Decision, NodeStatus, Run, RunSt
 from orchestrator.workers.base import Worker, WorkerError, WorkerResult, WorkScope
 
 TERMINAL = (NodeStatus.PASSED, NodeStatus.SKIPPED)
+VERIFY_SCOPE = WorkScope()  # a check verifies; it does not write
 
 
 class SchedulerError(Exception):
@@ -216,7 +217,33 @@ class Scheduler:
             # The work could not be performed. No facts, so the gate will ERROR —
             # which is the correct verdict, and not something to pre-empt here.
             return Outcome(node=node, error=str(exc))
-        return Outcome(node=node, result=result)
+
+        try:
+            observed = self._verify(node, inputs)
+        except WorkerError as exc:
+            # The check could not be performed. Also ERROR: an unrunnable check
+            # must never resolve to a pass, and it is not a failed gate either.
+            return Outcome(node=node, result=result, error=str(exc))
+
+        return Outcome(node=node, result=result, facts={**result.facts, **observed})
+
+    def _verify(self, node: Node, inputs: dict[str, str]) -> FactSet:
+        """Run the node's declared checks and collect what they observed.
+
+        This is D4 made operational. A gate expression like `ruff.exit_code == 0`
+        needs a fact only a tool can produce, and the node that wrote the code is
+        not that tool — an agent reporting its own lint result is an assertion.
+        So the plan names the checks, the engine runs them after the work, and
+        their facts are what the gate reads. Verified facts win over the node's
+        own on collision, for the same reason.
+
+        The checks go through the same worker as everything else, so a replayed
+        or stubbed run stays hermetic instead of shelling out.
+        """
+        observed: FactSet = {}
+        for probe in verify_probes(node):
+            observed.update(self.worker.run(probe, inputs, VERIFY_SCOPE).facts)
+        return observed
 
     # ----------------------------------------------------------------- #
     # recording
@@ -341,6 +368,7 @@ class Scheduler:
                 stage=node.stage,           # the children are the same phase of work
                 role=template.role,
                 write_scope=[_substitute(scope, item) for scope in template.write_scope],
+                verify=[_substitute(check, item) for check in template.verify],
                 freeze_paths=list(template.freeze_paths),
                 gate=template.gate,
                 model=template.model,
@@ -624,6 +652,25 @@ def _status_for(verdict: Verdict) -> NodeStatus:
         Verdict.FAIL: NodeStatus.FAILED,
         Verdict.ERROR: NodeStatus.ERRORED,
     }[verdict]
+
+
+def verify_probes(node: Node) -> list[Node]:
+    """The nodes a node's declared checks would run as.
+
+    Shared with `--dry-run`, so the commands it prints are the ones that would
+    actually execute — a preview built from a second code path is a preview of
+    something else.
+    """
+    return [
+        Node(
+            id=f"{node.id}#verify{index}",
+            kind=NodeKind.TOOL,
+            stage=node.stage,
+            run=check,
+            params=node.params,
+        )
+        for index, check in enumerate(node.verify)
+    ]
 
 
 def _config(node: Node) -> dict:

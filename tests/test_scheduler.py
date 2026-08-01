@@ -571,3 +571,104 @@ def test_the_worker_name_is_recorded_on_every_attempt(session, tmp_path):
     _, run = run_plan(session, plan_from(tmp_path, LINEAR), worker)
     attempts = [a for n in store.all_nodes(session, run) for a in n.attempts]
     assert {a.worker for a in attempts} == {"stub"}
+
+
+# --------------------------------------------------------------------------- #
+# verify — where a gate's facts come from
+# --------------------------------------------------------------------------- #
+
+VERIFIED = """
+plan: t
+version: 1
+nodes:
+  - id: scaffold
+    kind: derive
+    stage: implementation
+    run: py:orchestrator.derive.scaffold_from_design
+    verify:
+      - sh:ruff
+    gate: {all: ["ruff.exit_code == 0"]}
+"""
+
+
+def test_a_gate_reads_what_the_check_observed_not_what_the_node_claimed(session, tmp_path):
+    """D4, operationally.
+
+    `ruff.exit_code` is not something the node that wrote the code can report.
+    The plan names the check, the engine runs it, and the gate reads that.
+    """
+    worker = StubWorker(
+        {
+            "scaffold": scripts.self_reported("ruff.exit_code"),   # the node says it is fine
+            "scaffold#verify0": scripts.failing("ruff"),           # the tool says otherwise
+        }
+    )
+    _, run = run_plan(session, plan_from(tmp_path, VERIFIED), worker)
+
+    assert statuses(session, run)["scaffold"] is NodeStatus.FAILED
+    assert worker.calls[:2] == ["scaffold", "scaffold#verify0"]   # work, then check
+
+
+def test_a_passing_check_lets_the_gate_through(session, tmp_path):
+    worker = StubWorker(
+        {"scaffold": scripts.unevaluable(), "scaffold#verify0": scripts.passing("ruff")}
+    )
+    _, run = run_plan(session, plan_from(tmp_path, VERIFIED), worker)
+
+    assert run.status is RunStatus.COMPLETED
+    assert statuses(session, run)["scaffold"] is NodeStatus.PASSED
+
+
+def test_a_check_that_cannot_run_errors_rather_than_failing(session, tmp_path):
+    """The distinction the whole verdict vocabulary exists for: a check that did
+    not happen is not a check that said no, and must not enter the repair loop."""
+    worker = StubWorker(
+        {
+            "scaffold": scripts.unevaluable(),
+            "scaffold#verify0": WorkerError("command not found: ruff"),
+        }
+    )
+    _, run = run_plan(session, plan_from(tmp_path, VERIFIED), worker)
+
+    assert statuses(session, run)["scaffold"] is NodeStatus.ERRORED
+
+
+FANNED_OUT_CHECKS = """
+plan: t
+version: 1
+nodes:
+  - id: design
+    kind: agent
+    stage: design
+    role: architect
+    outputs: [modules]
+  - id: impl
+    kind: fanout
+    stage: implementation
+    needs: [design]
+    from: design.artifacts.modules
+    template:
+      kind: codeagent
+      role: implementer
+      write_scope: ["target/{item.path}/**"]
+      verify:
+        - "sh:ruff check target/{item.path}"
+      gate: {all: ["ruff.exit_code == 0"]}
+"""
+
+
+def test_each_fanout_child_checks_only_its_own_module(session, tmp_path):
+    """A child failing because a sibling's directory is dirty is not a signal."""
+    modules = '[{"name": "api", "path": "api"}]'
+    worker = StubWorker(
+        {
+            "design": scripts.passing("agent", **{"design.modules": modules}),
+            "impl:api": scripts.unevaluable(),
+            "impl:api#verify0": scripts.passing("ruff"),
+        }
+    )
+    scheduler, run = run_plan(session, plan_from(tmp_path, FANNED_OUT_CHECKS), worker)
+
+    child = scheduler._node("impl:api")
+    assert child.verify == ["sh:ruff check target/api"]
+    assert statuses(session, run)["impl:api"] is NodeStatus.PASSED

@@ -175,6 +175,7 @@ class NodeTemplate(BaseModel):
     model_config = _STRICT
     kind: NodeKind
     role: str | None = None
+    verify: list[str] = Field(default_factory=list)
     write_scope: list[str] = Field(default_factory=list)
     freeze_paths: list[str] = Field(default_factory=list)
     gate: Gate | None = None
@@ -209,6 +210,7 @@ class Node(BaseModel):
     presents: list[str] = Field(default_factory=list)  # human
 
     # Gates
+    verify: list[str] = Field(default_factory=list)     # checks the engine runs, then gates on
     entry_gate: Gate | None = None
     gate: Gate | None = None                           # the exit gate
     on_fail: RepairPolicy | None = None                # gate said no
@@ -272,12 +274,17 @@ class Node(BaseModel):
                 f"node '{self.id}' declares 'on_escalate' without 'escalate_when'"
             )
 
-        if self.run is not None:
-            schemes = tuple(f"{scheme}:" for scheme in RunScheme)
-            if not self.run.startswith(schemes):
+        schemes = tuple(f"{scheme}:" for scheme in RunScheme)
+        if self.run is not None and not self.run.startswith(schemes):
+            raise ValueError(
+                f"node '{self.id}': run must name its scheme — "
+                f"{' or '.join(schemes)} — got {self.run!r}"
+            )
+        for check in self.verify:
+            if not check.startswith(schemes):
                 raise ValueError(
-                    f"node '{self.id}': run must name its scheme — "
-                    f"{' or '.join(schemes)} — got {self.run!r}"
+                    f"node '{self.id}': verify entry must name its scheme — "
+                    f"{' or '.join(schemes)} — got {check!r}"
                 )
         return self
 

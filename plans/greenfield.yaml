@@ -59,7 +59,9 @@ nodes:
                                       # impl fans out over design.modules
     gate:                             # G3
       all:
-        - "openapi.valid == true"
+        - predicate: contract_is_valid          # a predicate, not an expression:
+                                                # only the artifact holds the contract,
+                                                # and its author cannot vouch for it
         - predicate: requirement_design_matrix_complete   # both directions
         - predicate: no_unmapped_design_elements          # catches gold-plating
 
@@ -78,8 +80,13 @@ nodes:
     stage: implementation
     needs: [design-approval]
     run: py:orchestrator.derive.scaffold_from_design
+    params:
+      root: "{target.root}"
     outputs: [manifest]
     write_scope: ["{target.root}/**"]
+    verify:                           # the engine runs these; the node does not
+      - "sh:{target.commands.lint}"
+      - py:orchestrator.gates.imports_resolve
     gate:                             # G4
       all:
         - "imports.resolve == true"
@@ -93,6 +100,8 @@ nodes:
     needs: [scaffold]
     inputs: [intake.artifacts.register]
     write_scope: ["{target.tests_root}/**"]
+    verify:
+      - "sh:{target.commands.test}"   # a code agent cannot report its own red
     gate:                             # G5 — the RED gate
       all:
         - "pytest.exit_code != 0"     # must FAIL against the scaffold
@@ -107,6 +116,9 @@ nodes:
       kind: codeagent
       role: implementer
       write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
+      verify:
+        - "sh:{target.commands.lint}"
+        - "sh:{target.commands.test}"
       gate:                           # G6, per module
         all:
           - "ruff.exit_code == 0"
@@ -118,6 +130,10 @@ nodes:
     stage: verification
     needs: [impl]
     run: "sh:{target.commands.test_cov}"
+    params:
+      coverage_report: coverage.json   # written by the command above
+    verify:
+      - py:orchestrator.gates.report_coverage
     freeze_paths: ["{target.tests_root}/**"]  # D6: immutable during repair
     gate:                              # G7 — the GREEN gate
       all:

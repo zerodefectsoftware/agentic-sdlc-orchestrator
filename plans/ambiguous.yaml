@@ -87,6 +87,7 @@ override:
     outputs: [spec, modules]
     gate:                               # G3
       all:
+        - predicate: contract_is_valid
         - predicate: requirement_design_matrix_complete
         - predicate: no_unmapped_design_elements
 

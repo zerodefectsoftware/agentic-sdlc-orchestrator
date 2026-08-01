@@ -9,6 +9,7 @@ label its own output `TOOL`-sourced could launder an opinion into evidence.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from orchestrator.artifacts import (
 )
 from orchestrator.derive import scaffold_from_design
 from orchestrator.engine.plan import Node
+from orchestrator.gates.checks import imports_resolve, report_coverage
 from orchestrator.gates.facts import FactSource
 from orchestrator.gates.security import security_scan
 from orchestrator.policy.triage import triage_ambiguities
@@ -240,3 +242,87 @@ def test_scaffolding_a_design_with_no_modules_still_makes_the_package():
     output = scaffold_from_design(task({"design.spec": Design().model_dump_json()}))
     assert list(output.files) == ["target/shortener/__init__.py"]
     assert json.loads("{}") == {}  # sanity: the artifact bodies are plain text, not JSON
+
+
+# --------------------------------------------------------------------------- #
+# the checks that produce a gate's facts
+# --------------------------------------------------------------------------- #
+
+
+def check_task(tmp_path, **params) -> Task:
+    return Task(
+        node=node(id="scaffold", run="py:orchestrator.gates.imports_resolve", params=params),
+        inputs={},
+        scope=WorkScope(),          # a check verifies; it does not write
+        cwd=tmp_path,
+    )
+
+
+def package(tmp_path, **modules: str) -> None:
+    root = tmp_path / "target" / "shortener"
+    root.mkdir(parents=True)
+    (root / "__init__.py").write_text("")
+    for name, body in modules.items():
+        (root / f"{name}.py").write_text(body)
+
+
+def test_a_package_whose_modules_import_reports_true(tmp_path):
+    package(tmp_path, storage="VALUE = 1\n", api="from shortener import storage\n")
+
+    output = imports_resolve(check_task(tmp_path, root="target/shortener"))
+
+    assert output.facts["imports.resolve"] is True
+    assert output.facts["imports.modules"] == 3      # package, storage, api
+
+
+def test_a_module_that_does_not_import_is_named(tmp_path):
+    """The failure the scaffold gate exists to catch: generated code that
+    references something that was never generated."""
+    package(tmp_path, api="from shortener import nowhere\n")
+
+    output = imports_resolve(check_task(tmp_path, root="target/shortener"))
+
+    assert output.facts["imports.resolve"] is False
+    assert any("shortener.api" in item for item in output.facts["imports.unresolved"])
+
+
+def test_an_empty_tree_is_not_a_pass(tmp_path):
+    """A scaffold that produced nothing and a scaffold whose every module
+    imports are different outcomes."""
+    (tmp_path / "target").mkdir()
+
+    output = imports_resolve(check_task(tmp_path, root="target/shortener"))
+    assert output.facts["imports.resolve"] is False
+
+
+def test_target_code_is_imported_in_a_separate_interpreter(tmp_path):
+    """A module with a side effect at import time must not run in this process."""
+    package(tmp_path, boom="import sys; sys.modules['ORCHESTRATOR_WAS_HERE'] = True\n")
+
+    imports_resolve(check_task(tmp_path, root="target/shortener"))
+    assert "ORCHESTRATOR_WAS_HERE" not in sys.modules
+
+
+def test_coverage_is_read_from_the_report_the_tool_wrote(tmp_path):
+    (tmp_path / "coverage.json").write_text(
+        json.dumps({"totals": {"percent_covered": 91.666, "num_statements": 120}})
+    )
+
+    output = report_coverage(check_task(tmp_path))
+
+    assert output.facts["coverage.percent"] == 91.67
+    assert output.facts["coverage.statements"] == 120
+
+
+def test_a_missing_coverage_report_errors_rather_than_reporting_zero(tmp_path):
+    """0% is a finding about the target; a missing report is a finding about
+    the run, and a gate must be able to tell them apart."""
+    with pytest.raises(WorkerError, match="no coverage report"):
+        report_coverage(check_task(tmp_path))
+
+
+def test_an_unreadable_coverage_report_errors(tmp_path):
+    (tmp_path / "coverage.json").write_text("not json")
+
+    with pytest.raises(WorkerError, match="not readable"):
+        report_coverage(check_task(tmp_path))

@@ -423,3 +423,55 @@ def test_every_registered_predicate_describes_itself(registry):
     """The description is what a preflight check shows when something is missing."""
     for name in registry.names:
         assert registry.get(name).description
+
+
+# --------------------------------------------------------------------------- #
+# the API contract
+# --------------------------------------------------------------------------- #
+
+
+def design_with(*endpoints: str) -> Design:
+    return Design(endpoints=list(endpoints))
+
+
+def contract(registry, session, run, artifacts, design: Design):
+    record(session, run, artifacts, "design.spec", design)
+    return check(registry, "contract_is_valid", context(session, run, artifacts))
+
+
+def test_a_well_formed_contract_passes(registry, session, run, artifacts):
+    passed, _ = contract(
+        registry, session, run, artifacts,
+        design_with("POST /shorten", "GET /{code}", "GET /links/{code}/stats"),
+    )
+    assert passed
+
+
+def test_a_design_with_no_endpoints_has_no_contract_to_keep(registry, session, run, artifacts):
+    passed, detail = contract(registry, session, run, artifacts, design_with())
+    assert not passed
+    assert "no endpoints" in detail
+
+
+def test_an_endpoint_nobody_can_parse_fails(registry, session, run, artifacts):
+    """The documentation gate compares the README against these; an endpoint
+    that does not parse matches nothing and would fail there instead, later."""
+    passed, detail = contract(
+        registry, session, run, artifacts, design_with("shorten a url", "GET /ok")
+    )
+    assert not passed
+    assert "shorten a url" in detail
+
+
+def test_a_duplicated_endpoint_fails(registry, session, run, artifacts):
+    passed, detail = contract(
+        registry, session, run, artifacts, design_with("GET /{code}", "GET /{code}")
+    )
+    assert not passed
+    assert "twice" in detail
+
+
+def test_an_unbalanced_path_parameter_fails(registry, session, run, artifacts):
+    passed, detail = contract(registry, session, run, artifacts, design_with("GET /{code"))
+    assert not passed
+    assert "unbalanced" in detail or "not '<METHOD>" in detail

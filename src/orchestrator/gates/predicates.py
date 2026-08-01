@@ -42,6 +42,8 @@ from orchestrator.lineage import query, recorder
 from orchestrator.state import store
 from orchestrator.state.models import NodeStatus
 
+ENDPOINT = re.compile(r"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/\S*")
+
 
 def _load(context: PredicateContext, name: str, model):
     """Read a recorded artifact and parse it against its contract."""
@@ -140,6 +142,45 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
         if high:
             return True, f"{len(high)} high-severity ambiguities: {_listed(high)}"
         return False, "no undisposed high-severity ambiguities"
+
+    # ------------------------------------------------------------------ #
+    # the API contract
+    # ------------------------------------------------------------------ #
+
+    @reg.register(
+        "contract_is_valid", "the API contract the design declares is well-formed"
+    )
+    def contract_is_valid(context: PredicateContext) -> tuple[bool, str]:
+        """A predicate, not an expression, because nothing can produce the fact.
+
+        `openapi.valid == true` was in this gate for a while and could never
+        hold: the design node is an agent, and a fact an agent produced about its
+        own output is inadmissible (D4). The contract exists only as the
+        artifact, so the check has to read the artifact — which is a predicate's
+        job. Everything downstream depends on it: the documentation gate compares
+        the README against these endpoints, and an endpoint nobody can parse
+        matches nothing.
+        """
+        design = _load(context, "design.spec", Design)
+        if not design.endpoints:
+            return False, "the design declares no endpoints — there is no contract to keep"
+
+        malformed = [e for e in design.endpoints if not ENDPOINT.fullmatch(e.strip())]
+        if malformed:
+            return False, (
+                f"{len(malformed)} endpoints are not '<METHOD> /path': {_listed(malformed)}"
+            )
+
+        seen: set[str] = set()
+        duplicates = sorted({e for e in design.endpoints if e in seen or seen.add(e)})
+        if duplicates:
+            return False, f"{len(duplicates)} endpoints declared twice: {_listed(duplicates)}"
+
+        unbalanced = [e for e in design.endpoints if e.count("{") != e.count("}")]
+        if unbalanced:
+            return False, f"unbalanced path parameters: {_listed(unbalanced)}"
+
+        return True, f"{len(design.endpoints)} endpoints, all well-formed and distinct"
 
     # ------------------------------------------------------------------ #
     # traceability

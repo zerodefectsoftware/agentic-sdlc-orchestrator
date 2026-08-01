@@ -9,10 +9,10 @@ scenarios — `greenfield.yaml` is the spine, `brownfield.yaml` and `ambiguous.y
 deltas over it (`extends` / `insert_after` / `override` / `remove`, see D19). All three
 pass `orchestrator preflight` and `orchestrator run --dry-run`.
 
-**Known gap:** three gate expressions in `greenfield.yaml` — `coverage.percent`,
-`openapi.valid`, `imports.resolve` — name facts no worker produces yet. Those gates will
-ERROR (not pass) in a live run, which is the correct verdict for an unperformable check,
-but they need producers before the greenfield demo means anything.
+Every gate check now has a producer. Nodes declare `verify:` entries the engine runs after
+the work (D22) — that is where `ruff.exit_code`, `pytest.exit_code`, `imports.resolve`, and
+`coverage.percent` come from. `openapi.valid` became the `contract_is_valid` predicate: the
+contract lives only in the design artifact, and its author cannot vouch for it.
 
 No live model call has ever been made, and `claude-agent-sdk` is not installed.
 

@@ -12,6 +12,7 @@ the *result of running something over* an artifact, never the artifact author's
 opinion of it.
 """
 
+from orchestrator.gates.checks import imports_resolve, report_coverage
 from orchestrator.gates.evaluator import (
     CheckResult,
     GateResult,
@@ -33,6 +34,8 @@ __all__ = [
     "UnknownPredicate",
     "Verdict",
     "evaluate_gate",
+    "imports_resolve",
+    "report_coverage",
     "registry",
     "security_scan",
     "required_predicates",

@@ -27,7 +27,7 @@ from orchestrator.artifacts import Baseline
 from orchestrator.config import MissingCredential, WorkerMode, get_settings
 from orchestrator.engine.loader import PlanError, execution_order, load_plan
 from orchestrator.engine.profile import ProfileError, TargetProfile
-from orchestrator.engine.scheduler import Scheduler
+from orchestrator.engine.scheduler import Scheduler, verify_probes
 from orchestrator.evidence import assemble, render
 from orchestrator.gates.predicates import register_all
 from orchestrator.gates.registry import PredicateRegistry
@@ -241,6 +241,15 @@ def _dry_run(loaded, requirement: Path) -> None:
         node = loaded.node(node_id)
         detail = worker.describe(node, material, WorkScope.for_node(node))
         problems.extend(f"{node.id}: {issue}" for issue in detail.pop("issues", []))
+
+        # The gate reads facts these produce, so an unroutable check is as fatal
+        # as an unroutable node — and just as worth knowing before a live run.
+        checks = []
+        for probe in verify_probes(node):
+            probe_detail = worker.describe(probe, material, WorkScope())
+            problems.extend(f"{probe.id}: {issue}" for issue in probe_detail.get("issues", []))
+            checks.append(probe.run)
+        detail["verify"] = checks
 
         header = f"[bold]{node.id}[/bold]  [dim]{node.stage} · {node.kind}[/dim]"
         body = "\n".join(

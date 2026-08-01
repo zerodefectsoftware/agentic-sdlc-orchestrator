@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .coverage
+coverage.json          # written by the tests node; read by the coverage check
 htmlcov/
 *.db
 *.sqlite3

@@ -213,6 +213,34 @@ gates check acceptance.
 a real tool: `pytest`, `ruff`, a schema validator, a traceability matrix. An agent's output
 is a *proposal* until something that is not an agent has checked it.
 
+**Where a gate's facts come from.** `ruff.exit_code == 0` on a node that never ran ruff is
+not a check — it is a check that ERRORs, which is the correct verdict and a useless one to
+ship. So a node declares the checks the engine runs after its work:
+
+```yaml
+- id: scaffold
+  kind: derive
+  run: py:orchestrator.derive.scaffold_from_design
+  verify:                                        # run by the engine, not the node
+    - "sh:{target.commands.lint}"                # → ruff.exit_code
+    - py:orchestrator.gates.imports_resolve      # → imports.resolve
+  gate:
+    all:
+      - "imports.resolve == true"
+      - "ruff.exit_code == 0"
+```
+
+This is D4 made operational rather than aspirational. The node that wrote the code is not
+the tool that judges it, and a fact a check observed wins over one the node reported. Checks
+go through the same `Worker` as everything else (D18), so a replayed run stays hermetic
+instead of shelling out; a check that cannot run makes the node ERROR rather than FAIL,
+because it did not say no — it did not answer.
+
+Some facts have no tool to produce them. The API contract exists only inside the design
+artifact, and its author cannot vouch for it, so `contract_is_valid` is a **predicate**: the
+engine reads the recorded artifact and checks it. The rule is the same either way — the
+evaluator is never the producer.
+
 Two gates are traceability matrices, and they are the most convincing artifacts the system
 produces — cheap to compute, impossible to fake:
 
@@ -683,6 +711,7 @@ claimed.
 | **D19** | Scenario plans are **deltas** over one base plan (`extends` / `insert_after` / `override` / `remove`), composed before validation | D16 claims a scenario is data. Three near-identical 180-line plan files would make that technically true and practically false — the second one to drift would prove it. Composing on raw mappings means a scenario is validated exactly like an authored plan; there is no second, weaker path into the scheduler | Reading a scenario means reading two files; a delta can express a graph its author did not picture |
 | **D20** | The target profile is the only place the target is named, and `{target.*}` resolves at load time | D3 says the orchestrator never imports the target; this is what keeps that survivable. Retargeting is a config change, and a resolved plan means `--dry-run` shows the command that will actually run | A plan is not fully readable without its profile |
 | **D21** | The baseline stores file **bodies**, not a reference to them | A rollback that can only name the state it wanted is a rollback in the documentation only. Content also means it works on a dirty tree and needs no VCS | Snapshot size grows with the target; fine at this scale, wrong for a large repo |
+| **D22** | A node declares `verify:` — checks the engine runs after the work, whose facts the gate then reads | The alternative is a gate expression naming a fact nothing produces (which ERRORs) or a node reporting on its own output (which D4 forbids). Also the only shape that works for fan-out children, where a per-module check cannot be a separate node | The plan carries commands as well as intent; a check is only as good as the tool behind it |
 | **D2** | SQLite backs orchestration state, not just target data | Safe-stop resumability and reliability metrics need durable, queryable run state | Single-node only |
 | **D3** | `orchestrator` never imports `shortener`; target specifics in a config profile | Makes generality checkable rather than claimed | Some indirection |
 | **D4** | Exit gates evaluated by a non-producer, preferably a real tool | Agent self-reports are assertions, not evidence | Gates limited to machine-checkable properties |
@@ -837,7 +866,9 @@ nodes:
                                       # impl fans out over design.modules
     gate:                             # G3
       all:
-        - "openapi.valid == true"
+        - predicate: contract_is_valid          # a predicate, not an expression:
+                                                # only the artifact holds the contract,
+                                                # and its author cannot vouch for it
         - predicate: requirement_design_matrix_complete   # both directions
         - predicate: no_unmapped_design_elements          # catches gold-plating
 
@@ -856,8 +887,13 @@ nodes:
     stage: implementation
     needs: [design-approval]
     run: py:orchestrator.derive.scaffold_from_design
+    params:
+      root: "{target.root}"
     outputs: [manifest]
     write_scope: ["{target.root}/**"]
+    verify:                           # the engine runs these; the node does not
+      - "sh:{target.commands.lint}"
+      - py:orchestrator.gates.imports_resolve
     gate:                             # G4
       all:
         - "imports.resolve == true"
@@ -871,6 +907,8 @@ nodes:
     needs: [scaffold]
     inputs: [intake.artifacts.register]
     write_scope: ["{target.tests_root}/**"]
+    verify:
+      - "sh:{target.commands.test}"   # a code agent cannot report its own red
     gate:                             # G5 — the RED gate
       all:
         - "pytest.exit_code != 0"     # must FAIL against the scaffold
@@ -885,6 +923,9 @@ nodes:
       kind: codeagent
       role: implementer
       write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
+      verify:
+        - "sh:{target.commands.lint}"
+        - "sh:{target.commands.test}"
       gate:                           # G6, per module
         all:
           - "ruff.exit_code == 0"
@@ -896,6 +937,10 @@ nodes:
     stage: verification
     needs: [impl]
     run: "sh:{target.commands.test_cov}"
+    params:
+      coverage_report: coverage.json   # written by the command above
+    verify:
+      - py:orchestrator.gates.report_coverage
     freeze_paths: ["{target.tests_root}/**"]  # D6: immutable during repair
     gate:                              # G7 — the GREEN gate
       all:
