@@ -701,7 +701,8 @@ nodes:
     kind: tool                        # policy evaluation, not a judgment call
     needs: [intake]
     run: py:orchestrator.policy.triage_ambiguities
-    escalate_when: "any(ambiguities, severity >= HIGH)"
+    escalate_when:
+      predicate: has_high_severity_ambiguity
     on_escalate: clarify-with-human
     gate:                             # G2
       all:
@@ -801,7 +802,8 @@ nodes:
     needs: [impl]
     run: py:orchestrator.gates.security_scan
     autonomy: REVIEW
-    escalate_when: "any(findings, severity >= HIGH)"   # policy overrides default
+    escalate_when:                    # policy overrides the node default
+      predicate: has_high_severity_finding
     may_waive: false                  # D15: agents never waive findings
     gate:                             # G9
       all:

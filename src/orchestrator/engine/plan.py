@@ -164,7 +164,7 @@ class Node(BaseModel):
 
     # Governance
     autonomy: Autonomy | None = None
-    escalate_when: str | None = None
+    escalate_when: GateCheck | None = None  # same vocabulary as a gate check
     on_escalate: str | None = None
     binds_to: list[str] = Field(default_factory=list)  # D10: version-bound approval
     may_waive: bool = True                             # D15
@@ -178,6 +178,16 @@ class Node(BaseModel):
     model: str | None = None
     effort: Effort | None = None
     retry_budget: int | None = None
+
+    @field_validator("escalate_when", mode="before")
+    @classmethod
+    def _normalise_escalation(cls, value: object) -> object:
+        """Accept a bare string as an expression, exactly as a gate check does.
+
+        Escalation is a condition over facts, so it uses the gate vocabulary
+        rather than a second expression language of its own.
+        """
+        return {"expression": value} if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _check_kind_requirements(self) -> Node:
@@ -261,3 +271,29 @@ class Plan(BaseModel):
             if node.id == node_id:
                 return node
         raise KeyError(f"no node '{node_id}' in plan '{self.name}'")
+
+    @property
+    def required_predicates(self) -> list[str]:
+        """Every predicate this plan names, from gates, escalations, and templates.
+
+        A run should refuse to start when the engine cannot supply one of these,
+        rather than discovering it at the gate and having to decide what an
+        unrunnable check means.
+        """
+        names: set[str] = set()
+
+        def collect(check: GateCheck | None) -> None:
+            if isinstance(check, PredicateCheck):
+                names.add(check.predicate)
+
+        for node in self.nodes:
+            collect(node.escalate_when)
+            gates = [node.gate, node.entry_gate]
+            if node.template:
+                gates.append(node.template.gate)
+            for gate in gates:
+                if gate is not None:
+                    for check in gate.checks:
+                        collect(check)
+
+        return sorted(names)

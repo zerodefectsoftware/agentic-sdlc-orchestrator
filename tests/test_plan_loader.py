@@ -143,6 +143,45 @@ def test_repair_policy_is_bounded(plan):
     assert policy.then == "escalate"
 
 
+def test_escalation_uses_the_gate_vocabulary(plan):
+    """One expression language, not two: escalation is a condition over facts."""
+    assert plan.node("ambiguity-triage").escalate_when == PredicateCheck(
+        predicate="has_high_severity_ambiguity"
+    )
+    assert plan.node("security").escalate_when == PredicateCheck(
+        predicate="has_high_severity_finding"
+    )
+
+
+def test_escalation_also_accepts_a_bare_expression(tmp_path):
+    """A plain comparison stays honest as an expression — no predicate ceremony."""
+    path = write_plan(
+        tmp_path,
+        """
+        plan: t
+        version: 1
+        nodes:
+          - id: a
+            kind: tool
+            run: sh:echo
+            escalate_when: "contract_diff.breaking == true"
+            on_escalate: b
+          - id: b
+            kind: human
+        """,
+    )
+    node = load_plan(path).node("a")
+    assert node.escalate_when == ExpressionCheck(expression="contract_diff.breaking == true")
+
+
+def test_required_predicates_spans_gates_escalations_and_templates(plan):
+    required = plan.required_predicates
+    assert "has_high_severity_ambiguity" in required   # from escalate_when
+    assert "no_stale_approvals" in required            # from a gate
+    assert "every_ac_has_a_test" in required           # from a gate
+    assert required == sorted(set(required))
+
+
 def test_run_scheme_separates_python_callables_from_shell_commands(plan):
     """Guessing between the two at dispatch time is how baffling failures happen."""
     security = plan.node("security")
