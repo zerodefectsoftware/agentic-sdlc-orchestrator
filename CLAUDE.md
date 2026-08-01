@@ -14,12 +14,14 @@ the work (D22) — that is where `ruff.exit_code`, `pytest.exit_code`, `imports.
 `coverage.percent` come from. `openapi.valid` became the `contract_is_valid` predicate: the
 contract lives only in the design artifact, and its author cannot vouch for it.
 
-No live model call has ever been made, and `claude-agent-sdk` is not installed.
+No live model call has ever been made. Both SDKs are now installed (`anthropic` 0.120.2,
+`claude-agent-sdk` 0.2.128) and their call shapes verified against the worker code, but a
+live run needs `ANTHROPIC_API_KEY` — which only the user can supply.
 
-`target/shortener/` holds a hand-written health endpoint from the toolchain check. **That is
-a temporary exception to the rule that the target is written by runs** — reset the target
-directory before the greenfield demo, or the falsifiability argument in `README.md` is
-false.
+`target/` is **empty except `target/tests/conftest.py`**, which is the ten-line `sys.path`
+shim that makes the target importable to pytest — harness, not deliverable. Nothing else
+under `target/` predates a run, which is what makes the falsifiability argument in
+`README.md` true. Do not hand-write anything there.
 
 `docs/architecture.md` is the design; `docs/repo-layout.md` says where things live.
 

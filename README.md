@@ -19,7 +19,7 @@ Design complete; implementation in progress.
 | | |
 | --- | --- |
 | Architecture and decision registry (D1–D22) | ✅ `docs/architecture.md` |
-| Toolchain, verified runnable | ✅ health endpoint + passing test |
+| Toolchain, verified runnable | ✅ full suite green; `target/` deliberately empty |
 | Orchestrator engine — graph, gates, policy, lineage | 🚧 in progress |
 | Scenario plans — greenfield / brownfield / ambiguous | ✅ `plans/` — one spine, two deltas |
 | Scenario runs, end to end | ⬜ not started |
