@@ -18,10 +18,11 @@ Design complete; implementation in progress.
 
 | | |
 | --- | --- |
-| Architecture and decision registry (D1–D15) | ✅ `docs/architecture.md` |
+| Architecture and decision registry (D1–D21) | ✅ `docs/architecture.md` |
 | Toolchain, verified runnable | ✅ health endpoint + passing test |
 | Orchestrator engine — graph, gates, policy, lineage | 🚧 in progress |
-| Scenario runs — greenfield / brownfield / ambiguous | ⬜ not started |
+| Scenario plans — greenfield / brownfield / ambiguous | ✅ `plans/` — one spine, two deltas |
+| Scenario runs, end to end | ⬜ not started |
 
 This README describes what runs today. It will grow as the engine lands.
 
@@ -45,11 +46,14 @@ Drive the orchestrator:
 ```bash
 orchestrator preflight                   # validate the plan; refuse to start if a check is missing
 orchestrator run                         # requirement in, stops at the first checkpoint
+orchestrator run --plan plans/brownfield.yaml --requirement requirements/brownfield.md
+orchestrator run --dry-run               # what each node would dispatch, executing nothing
 orchestrator status                      # node by node, with what is blocking
 orchestrator approve <run> <node> --by you
 orchestrator evidence --write            # the reviewable bundle
 orchestrator metrics                     # success rate, retries, MTTR
 orchestrator why design.spec             # trace an artifact to what produced it
+orchestrator rollback <run>              # restore the baseline, then verify the restore
 ```
 
 No API key is needed for `stub` or `replay` runs — see [`.env.example`](.env.example).

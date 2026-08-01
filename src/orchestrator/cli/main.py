@@ -13,6 +13,8 @@ hours is not a checkpoint.
 
 from __future__ import annotations
 
+import shlex
+import subprocess
 from pathlib import Path
 from typing import Annotated
 
@@ -21,8 +23,10 @@ from rich.console import Console
 from rich.table import Table
 from sqlalchemy import select
 
+from orchestrator.artifacts import Baseline
 from orchestrator.config import MissingCredential, WorkerMode, get_settings
 from orchestrator.engine.loader import PlanError, execution_order, load_plan
+from orchestrator.engine.profile import ProfileError, TargetProfile
 from orchestrator.engine.scheduler import Scheduler
 from orchestrator.evidence import assemble, render
 from orchestrator.gates.predicates import register_all
@@ -143,6 +147,9 @@ def preflight(
     plan: Annotated[Path, typer.Option(help="Plan graph to validate")] = Path(
         "plans/greenfield.yaml"
     ),
+    target: Annotated[Path, typer.Option(help="Target profile")] = Path(
+        "config/target.shortener.yaml"
+    ),
 ) -> None:
     """Validate a plan and confirm every check it names can be performed.
 
@@ -151,7 +158,7 @@ def preflight(
     an unrunnable check means.
     """
     try:
-        loaded = load_plan(plan, write_ceiling=["target/**"])
+        loaded = load_plan(plan, profile=_profile(target))
     except PlanError as exc:
         console.print(f"[red]invalid plan[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -183,7 +190,11 @@ def run(
     ] = False,
 ) -> None:
     """Start a run and execute until it blocks, finishes, or stops."""
-    loaded = load_plan(plan, write_ceiling=["target/**"])
+    try:
+        loaded = load_plan(plan, profile=_profile(target))
+    except PlanError as exc:
+        console.print(f"[red]invalid plan[/red] {exc}")
+        raise typer.Exit(1) from exc
     if dry_run:
         _dry_run(loaded, requirement)
         return
@@ -201,6 +212,15 @@ def run(
         run_id = scheduler.advance(session, started).id
 
     _show(run_id)
+
+
+def _profile(path: Path) -> TargetProfile:
+    """Load the target profile, or stop with a message rather than a traceback."""
+    try:
+        return TargetProfile.load(path)
+    except ProfileError as exc:
+        console.print(f"[red]invalid target profile[/red] {exc}")
+        raise typer.Exit(1) from exc
 
 
 def _dry_run(loaded, requirement: Path) -> None:
@@ -356,6 +376,93 @@ def _decide(
 
 
 @app.command()
+def rollback(
+    run_id: Annotated[str | None, typer.Argument()] = None,
+    by: Annotated[str, typer.Option(help="Who is deciding — recorded in the audit trail")] = "",
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="List what would be restored, and stop")
+    ] = False,
+) -> None:
+    """Restore the target to the run's baseline, then verify the restore.
+
+    Only meaningful for a plan that declares `rollback:` — greenfield has
+    nothing to return to. The bodies come from the baseline artifact rather than
+    from git, so this works on a dirty tree and needs no VCS.
+
+    The restore is verified, not assumed: an unverified restore is a second
+    unreviewed change to the target, made at the worst possible moment.
+    """
+    with store.Store().session() as session:
+        target = _resolve(session, run_id)
+        profile = _profile(Path(target.target_profile))
+        loaded = load_plan(
+            get_settings().plans_dir / f"{target.plan_name}.yaml", profile=profile
+        )
+        if loaded.rollback is None:
+            console.print(
+                f"[red]plan '{loaded.name}' declares no rollback[/red] — there is no "
+                f"recorded state to return to"
+            )
+            raise typer.Exit(1)
+
+        source = loaded.node(loaded.rollback.restore_from)
+        name = f"{source.id}.{source.outputs[0]}" if source and source.outputs else None
+        artifact = recorder.latest(session, target, name) if name else None
+        if artifact is None:
+            console.print(f"[red]no baseline recorded[/red] — '{name}' was never produced")
+            raise typer.Exit(1)
+
+        baseline = Baseline.model_validate_json(ArtifactStore().read(artifact))
+        ceiling = tuple(p.rstrip("*").rstrip("/") for p in profile.write_ceiling)
+        outside = sorted(path for path in baseline.files if not path.startswith(ceiling))
+        if outside:
+            # The snapshot is data like any other. Restoring it is still a write,
+            # and the write ceiling does not stop applying because it is a repair.
+            console.print(f"[red]refusing to restore outside {list(profile.write_ceiling)}[/red]")
+            console.print(f"  {', '.join(outside[:5])}")
+            raise typer.Exit(1)
+
+        console.print(
+            f"\n[bold]rollback[/bold] {target.id[:8]} → baseline {baseline.snapshot_ref} "
+            f"({len(baseline.files)} files)"
+        )
+        if dry_run:
+            for path in sorted(baseline.files):
+                console.print(f"  [dim]would restore[/dim] {path}")
+            return
+
+        for path, body in baseline.files.items():
+            destination = Path(path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(body)
+
+        completed = subprocess.run(  # noqa: S603 — the command comes from the target profile
+            shlex.split(loaded.rollback.verify_with),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        verified = completed.returncode == 0
+        reason = (
+            f"rolled back to {baseline.snapshot_ref}"
+            f"{'' if verified else ' — VERIFICATION FAILED'}"
+            f"{f' by {by}' if by else ''}"
+        )
+        store.finish_run(session, target, status=RunStatus.ROLLED_BACK, stop_reason=reason)
+        run_identifier = target.id
+
+    if verified:
+        console.print(f"[green]restored and verified[/green] — {loaded.rollback.verify_with}")
+    else:
+        console.print(
+            f"[red]restored, but verification failed[/red] "
+            f"(exit {completed.returncode}) — the target is not in a known-good state"
+        )
+    _show(run_identifier)
+    raise typer.Exit(0 if verified else 1)
+
+
+@app.command()
 def resume(run_id: Annotated[str | None, typer.Argument()] = None) -> None:
     """Continue a run that stopped at a checkpoint."""
     _advance(run_id)
@@ -364,8 +471,11 @@ def resume(run_id: Annotated[str | None, typer.Argument()] = None) -> None:
 def _advance(run_id: str | None) -> None:
     with store.Store().session() as session:
         target = _resolve(session, run_id)
+        # The profile is read back from the run, so a resumed run resolves the
+        # same commands and thresholds the first process did.
         loaded = load_plan(
-            get_settings().plans_dir / f"{target.plan_name}.yaml", write_ceiling=["target/**"]
+            get_settings().plans_dir / f"{target.plan_name}.yaml",
+            profile=_profile(Path(target.target_profile)),
         )
         scheduler = Scheduler(loaded, _worker(), registry=_registry(), artifacts=ArtifactStore())
         scheduler.rehydrate(session, target)  # inserted nodes came from a previous process

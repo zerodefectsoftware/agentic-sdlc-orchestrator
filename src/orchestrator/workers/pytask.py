@@ -48,6 +48,25 @@ class Task:
     scope: WorkScope
     cwd: Path
 
+    @property
+    def params(self) -> dict[str, Any]:
+        """What the plan configured this task with.
+
+        A task that hardcoded the target's test command would put knowledge of
+        the target inside the orchestrator (D3). The plan says it, the profile
+        supplies it, and the task reads it here.
+        """
+        return self.node.params
+
+    def param(self, name: str, default: Any = None) -> Any:
+        value = self.node.params.get(name, default)
+        if value is None:
+            raise WorkerError(
+                f"task '{self.node.run_target}' needs param '{name}' on node "
+                f"'{self.node.id}'. Declared: {sorted(self.node.params) or '(none)'}"
+            )
+        return value
+
     def require(self, name: str) -> str:
         """Fetch an input the task cannot work without.
 

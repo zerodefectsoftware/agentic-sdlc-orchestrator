@@ -1,0 +1,177 @@
+# Brownfield plan graph — a change to a target that already exists.
+#
+# This file is the D16 claim made checkable: a scenario is a *delta*, not a
+# second copy of the SDLC. Everything not mentioned here is inherited from
+# greenfield, so a change to the shared spine reaches all three scenarios and
+# cannot drift apart from them.
+#
+# What brownfield adds over greenfield is one idea in three places:
+#   there is prior state, and it can be broken.
+#     - baseline-capture  — record what to return to, and what was already red
+#     - codebase-map      — derive what exists, so the analysis can be checked
+#     - impact-analysis   — reason about blast radius before designing
+#     - tests             — regression, not just green
+#     - rollback          — a restore that can actually be performed
+#
+# And one thing it removes: scaffolding. Deriving package stubs over a live
+# codebase would overwrite the code the run is supposed to be changing.
+
+plan: brownfield
+extends: greenfield
+version: 1
+description: Change an existing target under regression, escalation, and rollback control.
+
+# ── Restore point ─────────────────────────────────────────────────────────
+# The engine can perform this: baseline-capture stores file bodies, not a
+# reference to them. `verify_with` is what has to pass before a rollback is
+# believed — a restore nobody checked is a second unverified change.
+rollback:
+  restore_from: baseline-capture
+  verify_with: "{target.commands.test}"
+
+insert_after:
+
+  intake:
+    # Before anything writes: what is here, and what is already broken?
+    - id: baseline-capture
+      kind: tool
+      stage: requirements
+      run: py:orchestrator.policy.capture_baseline
+      params:
+        command: "{target.commands.test}"
+        root: "{target.root}"
+      outputs: [snapshot]
+      gate:                             # B1
+        all:
+          - predicate: baseline_is_green
+
+    # Parsed, not described — the ground truth impact-analysis is checked against.
+    - id: codebase-map
+      kind: derive
+      stage: design
+      run: py:orchestrator.derive.map_codebase
+      params:
+        root: "{target.root}"
+      outputs: [map]
+      gate:                             # B2
+        all:
+          - "codemap.files > 0"         # an empty map means brownfield is the wrong plan
+          - "codemap.unparsable == 0"
+
+    - id: impact-analysis
+      kind: agent
+      stage: design
+      role: codebase-analyst
+      inputs: [codebase-map.artifacts.map]
+      output_schema: schemas/impact_analysis.json
+      outputs: [report, affected_modules]   # impl fans out over the second
+      escalate_when:                        # D13 — change control, not a code opinion
+        predicate: has_breaking_contract_change
+      on_escalate: breaking-change-review
+      gate:                             # B3
+        all:
+          - predicate: schema_valid
+          - predicate: every_referenced_symbol_exists
+
+    # Placed, not spliced: it declares its own needs, so nothing waits on it.
+    # Instantiated only when a breaking contract change is found.
+    - id: breaking-change-review
+      kind: human
+      stage: design
+      needs: []
+      optional: true
+      autonomy: APPROVE
+      presents: [impact-analysis.artifacts.report]
+
+override:
+
+  # The architect designs a change to something, not a system from nothing.
+  design:
+    id: design
+    kind: agent
+    stage: design
+    role: architect
+    needs: [ambiguity-triage]
+    inputs: [impact-analysis.artifacts.report]
+    output_schema: schemas/design.json
+    outputs: [spec, modules]
+    gate:                               # G3, unchanged
+      all:
+        - predicate: requirement_design_matrix_complete
+        - predicate: no_unmapped_design_elements
+
+  # The approval covers the impact analysis too: approving a design without the
+  # blast radius it rests on is approving half the decision (D10).
+  design-approval:
+    id: design-approval
+    kind: human
+    stage: design
+    needs: [design]
+    autonomy: APPROVE
+    binds_to: [design.artifacts.spec, impact-analysis.artifacts.report]
+
+  # Nothing scaffolds it now, so the acceptance suite hangs off the approval.
+  # The RED gate still holds, and means something sharper here than in
+  # greenfield: a test that reproduces the reported defect must fail against
+  # the current code. One that passes has not reproduced anything.
+  tests-acceptance:
+    id: tests-acceptance
+    kind: codeagent
+    stage: verification
+    role: test-author
+    needs: [design-approval]
+    inputs: [intake.artifacts.register, impact-analysis.artifacts.report]
+    outputs: [suite]
+    write_scope: ["target/tests/**"]
+    gate:                               # G5 — the RED gate
+      all:
+        - "pytest.exit_code != 0"
+        - predicate: every_ac_has_a_test
+
+  # Fan out over what the analysis found affected, not over a design's modules:
+  # in brownfield the blast radius is discovered, not declared.
+  impl:
+    id: impl
+    kind: fanout
+    stage: implementation
+    needs: [tests-acceptance]
+    from: impact-analysis.artifacts.affected_modules
+    template:
+      kind: codeagent
+      role: implementer
+      write_scope: ["{target.root}/{item.path}/**"]
+      gate:                             # G6, per module
+        all:
+          - "ruff.exit_code == 0"
+
+  # The brownfield verification gate. `pytest.exit_code == 0` cannot express
+  # this: against a suite that was red on arrival it blocks every change
+  # forever, and against one that was green it accepts a change that broke
+  # something the run then "fixed" by deleting the test. The comparison is
+  # against the recorded baseline, and both sides come from running the
+  # target's own suite.
+  tests:
+    id: tests
+    kind: tool
+    stage: verification
+    needs: [impl]
+    run: py:orchestrator.policy.verify_no_regression
+    params:
+      command: "{target.commands.test}"
+    inputs: [baseline-capture.artifacts.snapshot]
+    freeze_paths: ["target/tests/**"]   # D6
+    gate:                               # B4
+      all:
+        - "tests.exit_code == 0"
+        - predicate: no_pre_existing_test_regressed
+        - predicate: ac_test_matrix_complete
+    on_fail:
+      insert: fix
+      scoped_to: failing_module
+      max_attempts: 2
+      then: escalate
+
+remove:
+  # Deriving package stubs from a design would overwrite the live code this
+  # run exists to change. Greenfield's one node that brownfield must not run.
+  - scaffold

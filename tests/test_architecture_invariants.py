@@ -10,6 +10,9 @@ from pathlib import Path
 
 import yaml
 
+from orchestrator.engine.loader import load_plan
+from orchestrator.engine.profile import TargetProfile
+
 REPO = Path(__file__).resolve().parents[1]
 ORCHESTRATOR = REPO / "src" / "orchestrator"
 
@@ -108,15 +111,19 @@ def test_run_targets_declare_their_execution_scheme():
 def test_write_scopes_stay_inside_the_target():
     """No node may write outside the target tree.
 
-    The orchestrator must not be modifiable by the agents it governs.
+    The orchestrator must not be modifiable by the agents it governs. Loaded
+    through the loader rather than read as text, so scenario plans — which are
+    deltas, and whose nodes are not all in their own file — are covered too.
     """
+    profile = TargetProfile.load(REPO / "config" / "target.shortener.yaml")
+
     for path in sorted((REPO / "plans").glob("*.yaml")):
-        plan = yaml.safe_load(path.read_text())
-        for node in plan.get("nodes") or []:
-            scopes = list(node.get("write_scope", []))
-            template = node.get("template") or {}
-            scopes += list(template.get("write_scope", []))
+        plan = load_plan(path, profile=profile)
+        for node in plan.nodes:
+            scopes = list(node.write_scope)
+            if node.template:
+                scopes += list(node.template.write_scope)
             for scope in scopes:
                 assert scope.startswith("target/"), (
-                    f"{path.name}: {node['id']} writes outside target/: {scope}"
+                    f"{path.name}: {node.id} writes outside target/: {scope}"
                 )

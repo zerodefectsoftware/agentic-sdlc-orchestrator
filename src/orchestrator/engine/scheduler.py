@@ -44,7 +44,7 @@ from orchestrator.lineage import recorder
 from orchestrator.policy.failure import Action, escalation_node, respond_to
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
-from orchestrator.state.models import Artifact, NodeStatus, Run, RunStatus
+from orchestrator.state.models import Artifact, Decision, NodeStatus, Run, RunStatus
 from orchestrator.workers.base import Worker, WorkerError, WorkerResult, WorkScope
 
 TERMINAL = (NodeStatus.PASSED, NodeStatus.SKIPPED)
@@ -180,11 +180,17 @@ class Scheduler:
 
         for dependency in [*node.needs, *node.inputs]:
             upstream = self._node(dependency.split(".", 1)[0])
-            names = upstream.outputs if upstream else []
-            for output in names:
+            if upstream is None:
+                continue
+            for output in upstream.outputs:
                 artifact = recorder.latest(session, run, f"{upstream.id}.{output}")
                 if artifact is not None:
                     material[artifact.name] = self.artifacts.read(artifact)
+
+            if upstream.kind is NodeKind.HUMAN:
+                decision = _decision_text(session, run, upstream.id)
+                if decision:
+                    material[f"{upstream.id}.decision"] = decision
         return material
 
     def _execute(self, wave: list[Node], material: dict[str, dict[str, str]]) -> list[Outcome]:
@@ -635,6 +641,29 @@ def _substitute(pattern: str, item: dict) -> str:
     for key, value in item.items():
         pattern = pattern.replace(f"{{item.{key}}}", str(value))
     return pattern
+
+
+def _decision_text(session: Session, run: Run, node_id: str) -> str | None:
+    """What a person actually said at a checkpoint.
+
+    Without this a clarification checkpoint changes nothing: the run stops, a
+    human answers, and the answer stays in the audit trail while the node that
+    asked the question is handed the same material it had before. The decision
+    is context, and §4.4 of the brief asks for context to cross stages.
+    """
+    decided = [
+        approval
+        for approval in run.approvals
+        if approval.node_id == node_id and approval.decision is not Decision.PENDING
+    ]
+    if not decided:
+        return None
+
+    approval = decided[-1]
+    lines = [f"decision: {approval.decision}", f"by: {approval.decided_by}"]
+    if approval.note:
+        lines.append(f"note:\n{approval.note}")
+    return "\n".join(lines)
 
 
 def _artifact_name(ref: str) -> str:

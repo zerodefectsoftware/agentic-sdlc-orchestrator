@@ -8,6 +8,8 @@ Escalation inserts a `human` node rather than parking the run in a status, so
 every human interaction is uniform in the graph and in the evidence bundle.
 """
 
+from orchestrator.policy.baseline import capture_baseline, verify_no_regression
+from orchestrator.policy.clarify import normalize_clarification
 from orchestrator.policy.failure import (
     ESCALATION_PREFIX,
     Action,
@@ -19,6 +21,9 @@ from orchestrator.policy.triage import triage_ambiguities
 
 __all__ = [
     "ESCALATION_PREFIX",
+    "capture_baseline",
+    "normalize_clarification",
+    "verify_no_regression",
     "Action",
     "Response",
     "escalation_node",

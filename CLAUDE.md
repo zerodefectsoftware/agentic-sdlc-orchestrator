@@ -4,8 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Design complete, engine not built. `src/orchestrator/` is a package skeleton;
-`plans/greenfield.yaml` is a real plan graph with no engine to execute it yet.
+Engine built and tested; no live run has happened yet. `plans/` holds all three
+scenarios — `greenfield.yaml` is the spine, `brownfield.yaml` and `ambiguous.yaml` are
+deltas over it (`extends` / `insert_after` / `override` / `remove`, see D19). All three
+pass `orchestrator preflight` and `orchestrator run --dry-run`.
+
+**Known gap:** three gate expressions in `greenfield.yaml` — `coverage.percent`,
+`openapi.valid`, `imports.resolve` — name facts no worker produces yet. Those gates will
+ERROR (not pass) in a live run, which is the correct verdict for an unperformable check,
+but they need producers before the greenfield demo means anything.
+
+No live model call has ever been made, and `claude-agent-sdk` is not installed.
 
 `target/shortener/` holds a hand-written health endpoint from the toolchain check. **That is
 a temporary exception to the rule that the target is written by runs** — reset the target
@@ -14,8 +23,7 @@ false.
 
 `docs/architecture.md` is the design; `docs/repo-layout.md` says where things live.
 
-Git is initialized on `main` with no commits yet. Per the user's global rules, Claude
-commits only — the user handles push, remote setup, and destructive ops.
+Per the user's global rules, Claude commits only — the user handles push, remote setup, and destructive ops.
 
 ## Commands
 

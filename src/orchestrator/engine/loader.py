@@ -18,7 +18,9 @@ import networkx as nx
 import yaml
 from pydantic import ValidationError
 
+from orchestrator.engine.compose import CompositionError, compose
 from orchestrator.engine.plan import Node, Plan
+from orchestrator.engine.profile import ProfileError, TargetProfile
 
 
 class PlanError(Exception):
@@ -32,15 +34,28 @@ class PlanError(Exception):
         super().__init__(f"{self.path}: {message}")
 
 
-def load_plan(path: Path | str, *, write_ceiling: list[str] | None = None) -> Plan:
+def load_plan(
+    path: Path | str,
+    *,
+    profile: TargetProfile | None = None,
+    write_ceiling: list[str] | None = None,
+) -> Plan:
     """Parse, validate, and return the plan at `path`.
 
-    `write_ceiling` comes from the target profile. When supplied, every
-    `write_scope` in the plan must fall inside it — the orchestrator must not be
-    modifiable by the agents it governs.
+    `profile` supplies the `{target.*}` values the plan references and, unless
+    `write_ceiling` overrides it, the ceiling every `write_scope` must fall
+    inside — the orchestrator must not be modifiable by the agents it governs.
     """
     path = Path(path)
-    raw = _read_yaml(path)
+    raw = _resolve(path, _read_yaml(path))
+
+    if profile is not None:
+        try:
+            raw = profile.resolve(raw)
+        except ProfileError as exc:
+            raise PlanError(path, str(exc)) from exc
+        if write_ceiling is None:
+            write_ceiling = profile.write_ceiling
 
     try:
         plan = Plan.model_validate(raw)
@@ -50,6 +65,7 @@ def load_plan(path: Path | str, *, write_ceiling: list[str] | None = None) -> Pl
     _check_unique_ids(path, plan)
     _check_references_resolve(path, plan)
     _check_acyclic(path, plan)
+    _check_rollback_resolves(path, plan)
     if write_ceiling is not None:
         _check_write_scopes(path, plan, write_ceiling)
 
@@ -74,6 +90,30 @@ def execution_order(plan: Plan) -> list[str]:
 # --------------------------------------------------------------------------- #
 # internals
 # --------------------------------------------------------------------------- #
+
+
+def _resolve(path: Path, raw: dict, *, seen: tuple[str, ...] = ()) -> dict:
+    """Apply `extends` chains, innermost first.
+
+    A composed plan is then validated exactly like an authored one — there is no
+    second, weaker path into the scheduler.
+    """
+    base_name = raw.get("extends")
+    if not base_name:
+        return raw
+
+    if base_name in seen:
+        raise PlanError(path, f"circular extends: {' -> '.join([*seen, base_name])}")
+
+    base_path = path.parent / f"{base_name}.yaml"
+    if not base_path.exists():
+        raise PlanError(path, f"extends '{base_name}', but {base_path} does not exist")
+
+    base = _resolve(base_path, _read_yaml(base_path), seen=(*seen, base_name))
+    try:
+        return compose(base, raw)
+    except CompositionError as exc:
+        raise PlanError(path, str(exc)) from exc
 
 
 def _read_yaml(path: Path) -> dict:
@@ -115,6 +155,23 @@ def _check_references_resolve(path: Path, plan: Plan) -> None:
             raise PlanError(
                 path, f"node '{node.id}' escalates to unknown node '{node.on_escalate}'"
             )
+
+
+def _check_rollback_resolves(path: Path, plan: Plan) -> None:
+    """A restore point that names nothing is a failure control in name only."""
+    if plan.rollback is None:
+        return
+    if plan.rollback.restore_from not in set(plan.node_ids):
+        raise PlanError(
+            path, f"rollback restores from unknown node '{plan.rollback.restore_from}'"
+        )
+    source = plan.node(plan.rollback.restore_from)
+    if not source.outputs:
+        raise PlanError(
+            path,
+            f"rollback restores from '{source.id}', which declares no outputs — "
+            f"there is no recorded state to return to",
+        )
 
 
 def _check_acyclic(path: Path, plan: Plan) -> None:

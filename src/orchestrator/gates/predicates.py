@@ -22,12 +22,17 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from pydantic import ValidationError
 
 from orchestrator.artifacts import (
+    SCHEMAS,
     AcceptanceSuite,
+    Baseline,
+    CodeMap,
     Design,
+    ImpactAnalysis,
     RequirementRegister,
     SecurityReport,
 )
@@ -66,14 +71,35 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
 
     @reg.register("schema_valid", "the artifact parses against its declared contract")
     def schema_valid(context: PredicateContext) -> tuple[bool, str]:
+        """Validates the node's primary output against the schema it declares.
+
+        The primary output is the first one listed, because the others are
+        projections of it — `design` declares `[spec, modules]` and the second is
+        a field of the first. Reading the schema from the node rather than
+        hardcoding one per node is what lets a scenario plan add an agent node
+        without also adding a predicate.
+        """
         node = context.require("node")
         if not node.output_schema:
             return True, "no schema declared for this node"
+
+        name = Path(node.output_schema).stem
+        model = SCHEMAS.get(name)
+        if model is None:
+            # Unknown schema, so the check cannot be performed. ERROR, never green.
+            raise LookupError(
+                f"node '{node.id}' declares schema '{node.output_schema}', which is "
+                f"not a known contract; known: {', '.join(sorted(SCHEMAS))}"
+            )
+
+        output = node.outputs[0] if node.outputs else "artifact"
         try:
-            _load(context, f"{node.id}.register", RequirementRegister)
+            _load(context, f"{node.id}.{output}", model)
         except ValidationError as exc:
-            return False, f"artifact does not match its schema: {exc.error_count()} errors"
-        return True, "artifact matches its schema"
+            return False, (
+                f"'{node.id}.{output}' does not match {name}: {exc.error_count()} errors"
+            )
+        return True, f"'{node.id}.{output}' matches {name}"
 
     @reg.register(
         "every_requirement_has_testable_ac",
@@ -172,6 +198,101 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
         "ac_test_matrix_complete",
         "alias of every_ac_has_a_test, checked again after implementation",
     )(every_ac_has_a_test)
+
+    # ------------------------------------------------------------------ #
+    # brownfield — prior state exists, so it can be broken
+    # ------------------------------------------------------------------ #
+
+    @reg.register("baseline_is_green", "the target's suite passed before anything changed")
+    def baseline_is_green(context: PredicateContext) -> tuple[bool, str]:
+        """A red baseline is a stop, not a caveat.
+
+        Proceeding from one means no later failure can be attributed to this
+        run's change — which disables every regression control downstream while
+        leaving them looking enforced.
+        """
+        baseline = _load(context, "baseline.snapshot", Baseline)
+        if not baseline.green:
+            return False, (
+                f"the target's suite was already failing before this run: "
+                f"{len(baseline.failing)} tests red ({_listed(baseline.failing)}). "
+                f"Nothing downstream can distinguish a regression from an "
+                f"inherited failure until this is resolved."
+            )
+        return True, f"baseline green at {baseline.snapshot_ref} ({len(baseline.files)} files)"
+
+    @reg.register(
+        "every_referenced_symbol_exists",
+        "the impact analysis names code that is actually there",
+    )
+    def every_referenced_symbol_exists(context: PredicateContext) -> tuple[bool, str]:
+        """The anti-hallucination check, and the reason the code map is derived.
+
+        An impact analysis is prose an agent produced; the map is parsed from the
+        tree by a different producer. Checking one against the other is D4 applied
+        to the one artifact most able to be confidently wrong.
+        """
+        analysis = _load(context, "impact-analysis.report", ImpactAnalysis)
+        code_map = _load(context, "codebase.map", CodeMap)
+
+        known = code_map.symbol_refs
+        invented = [ref for ref in analysis.referenced_symbols if ref not in known]
+        if invented:
+            return False, (
+                f"{len(invented)} referenced symbols do not exist in the target: "
+                f"{_listed(invented)}"
+            )
+
+        missing_modules = [m.path for m in analysis.affected_modules
+                           if not any(path.startswith(f"{code_map.root}/{m.path}")
+                                      or m.path in path for path in code_map.files)]
+        if missing_modules:
+            return False, f"affected modules not present: {_listed(missing_modules)}"
+
+        return True, (
+            f"all {len(analysis.referenced_symbols)} referenced symbols and "
+            f"{len(analysis.affected_modules)} modules exist"
+        )
+
+    @reg.register(
+        "has_breaking_contract_change",
+        "the change alters the published interface (D13 escalation)",
+    )
+    def has_breaking_contract_change(context: PredicateContext) -> tuple[bool, str]:
+        analysis = _load(context, "impact-analysis.report", ImpactAnalysis)
+        diff = analysis.contract_diff
+        if diff.breaking:
+            return True, (
+                f"breaking contract change — removed: {_listed(diff.removed) or 'none'}; "
+                f"changed: {_listed(diff.changed) or 'none'}"
+            )
+        return False, "no breaking contract change declared"
+
+    @reg.register(
+        "no_pre_existing_test_regressed",
+        "no test that passed before this run fails now",
+    )
+    def no_pre_existing_test_regressed(context: PredicateContext) -> tuple[bool, str]:
+        """Reads the comparison; does not perform it.
+
+        The set difference is a tool node's job, so the evidence carries a
+        recorded result rather than a check that re-ran itself at gate time and
+        agreed with itself.
+        """
+        recorded = context.facts.get("regression.new_failures")
+        if recorded is None:
+            raise LookupError(
+                "no regression comparison was recorded — the verification node "
+                "must compare against the baseline before this gate can hold"
+            )
+        if recorded.value:
+            ids = context.facts.get("regression.ids")
+            listed = _listed(list(ids.value)) if ids else "(ids not recorded)"
+            return False, f"{recorded.value} tests regressed: {listed}"
+
+        inherited = context.facts.get("regression.inherited")
+        note = f", {inherited.value} still red from before" if inherited else ""
+        return True, f"no test regressed{note}"
 
     # ------------------------------------------------------------------ #
     # security

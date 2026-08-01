@@ -31,14 +31,16 @@ from orchestrator.engine.plan import (
     RunScheme,
     Stage,
 )
+from orchestrator.engine.profile import TargetProfile
 
 REPO = Path(__file__).resolve().parents[1]
 GREENFIELD = REPO / "plans" / "greenfield.yaml"
+PROFILE = TargetProfile.load(REPO / "config" / "target.shortener.yaml")
 
 
 @pytest.fixture
 def plan():
-    return load_plan(GREENFIELD)
+    return load_plan(GREENFIELD, profile=PROFILE)
 
 
 def write_plan(tmp_path: Path, body: str) -> Path:
@@ -239,7 +241,8 @@ def test_run_scheme_separates_python_callables_from_shell_commands(plan):
 
     tests = plan.node("tests")
     assert tests.run_scheme is RunScheme.SH
-    assert tests.run_target == "{target.commands.test_cov}"
+    # Resolved from the profile at load time, so --dry-run shows the real command.
+    assert tests.run_target == PROFILE.commands["test_cov"]
 
 
 # --------------------------------------------------------------------------- #
@@ -406,7 +409,8 @@ def test_write_scope_outside_the_ceiling_is_rejected(tmp_path):
 
 
 def test_real_plan_satisfies_the_write_ceiling():
-    assert load_plan(GREENFIELD, write_ceiling=["target/**"])
+    """The ceiling comes from the profile, so the plan and the target agree."""
+    assert load_plan(GREENFIELD, profile=PROFILE)
 
 
 def test_missing_file_is_reported_clearly(tmp_path):

@@ -53,6 +53,7 @@ nodes:
     stage: design
     role: architect
     needs: [ambiguity-triage]
+    inputs: [intake.artifacts.register]
     output_schema: schemas/design.json
     outputs: [spec, modules]          # gates read design.spec;
                                       # impl fans out over design.modules
@@ -78,7 +79,7 @@ nodes:
     needs: [design-approval]
     run: py:orchestrator.derive.scaffold_from_design
     outputs: [manifest]
-    write_scope: ["target/shortener/**"]
+    write_scope: ["{target.root}/**"]
     gate:                             # G4
       all:
         - "imports.resolve == true"
@@ -90,8 +91,8 @@ nodes:
     role: test-author                 # deliberately NOT the implementer (D5)
     outputs: [suite]                  # gates read tests-acceptance.suite
     needs: [scaffold]
-    inputs: [intake.artifacts.acceptance_criteria]
-    write_scope: ["target/tests/**"]
+    inputs: [intake.artifacts.register]
+    write_scope: ["{target.tests_root}/**"]
     gate:                             # G5 — the RED gate
       all:
         - "pytest.exit_code != 0"     # must FAIL against the scaffold
@@ -105,7 +106,7 @@ nodes:
     template:
       kind: codeagent
       role: implementer
-      write_scope: ["target/shortener/{item.path}/**"]   # D7 blast radius
+      write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
       gate:                           # G6, per module
         all:
           - "ruff.exit_code == 0"
@@ -117,7 +118,7 @@ nodes:
     stage: verification
     needs: [impl]
     run: "sh:{target.commands.test_cov}"
-    freeze_paths: ["target/tests/**"]  # D6: immutable during repair
+    freeze_paths: ["{target.tests_root}/**"]  # D6: immutable during repair
     gate:                              # G7 — the GREEN gate
       all:
         - "pytest.exit_code == 0"

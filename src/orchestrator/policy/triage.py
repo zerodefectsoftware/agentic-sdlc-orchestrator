@@ -16,9 +16,21 @@ from orchestrator.workers.pytask import Task, TaskOutput
 
 ESCALATION_THRESHOLD = Severity.HIGH
 
+# Ordered, so "escalate at this severity and above" is expressible.
+RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2}
+
 
 def triage_ambiguities(task: Task) -> TaskOutput:
+    """Dispose of every ambiguity: escalate it, or record an assumption.
+
+    The threshold is a plan parameter rather than a constant, because it is the
+    calibration knob of controlled autonomy and different scenarios want it in
+    different places. A vague requirement is worth more interruptions than a
+    clear one — `ambiguous.yaml` lowers it to MEDIUM, and says so in data where
+    a reviewer can see it.
+    """
     register = RequirementRegister.model_validate_json(task.require("intake.register"))
+    threshold = Severity(str(task.params.get("threshold", ESCALATION_THRESHOLD)).lower())
 
     escalate = []
     assumed = []
@@ -26,7 +38,7 @@ def triage_ambiguities(task: Task) -> TaskOutput:
     for ambiguity in register.ambiguities:
         if ambiguity.is_disposed:
             continue
-        if ambiguity.severity is ESCALATION_THRESHOLD:
+        if RANK[ambiguity.severity] >= RANK[threshold]:
             escalate.append(ambiguity.id)
             continue
         # Below the threshold: record the assumption and carry it forward, so a
@@ -34,7 +46,7 @@ def triage_ambiguities(task: Task) -> TaskOutput:
         ambiguity.disposition = Disposition.ASSUMPTION
         ambiguity.answer = ambiguity.answer or (
             f"assumed by policy: severity {ambiguity.severity} is below the "
-            f"escalation threshold"
+            f"escalation threshold ({threshold})"
         )
         assumed.append(ambiguity.id)
 
@@ -43,6 +55,7 @@ def triage_ambiguities(task: Task) -> TaskOutput:
             "ambiguities.total": len(register.ambiguities),
             "ambiguities.escalated": len(escalate),
             "ambiguities.assumed": len(assumed),
+            "ambiguities.threshold": str(threshold),
         },
         artifacts={"intake.register": register.model_dump_json(indent=2)},
     )

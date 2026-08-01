@@ -584,7 +584,9 @@ work to flow downhill; a controlled flow *uphill* is what distinguishes this fro
 
 ## 7. Scenario paths
 
-One plan template; three traversals. That is the generality argument.
+One spine, two deltas, three traversals. `plans/greenfield.yaml` is the SDLC;
+`brownfield.yaml` and `ambiguous.yaml` say what they change about it and inherit the rest
+(D19). Nothing in `src/orchestrator/` distinguishes them.
 
 ### Greenfield
 Full fan-out, triage passes through. Demonstrates decomposition, parallelism with
@@ -600,12 +602,15 @@ Adds:
 
 | Addition | Purpose |
 | --- | --- |
-| `impact-analysis` node | §4.3 of the brief: impacted modules, APIs, data flows, invalidated prior decisions, regression surface. **Gate:** every file/symbol named must exist in the repo — catches hallucinated impact analysis. |
-| `baseline-capture` node | Run existing suite, snapshot tree. **Gate: baseline must be green** — otherwise safe-stop, because failures cannot be attributed. Also supplies the rollback target. |
-| Restricted fan-out | impl nodes only for affected modules |
-| Regression gate | Two populations, opposite requirements: new tests **red→green**; existing tests **green→green** |
-| Breaking-change approval | Breaking OpenAPI diff → forced `APPROVE` |
-| **Rollback path** | Exercised here; greenfield has nothing to restore to |
+| `baseline-capture` node | Runs the existing suite and snapshots the tree **before anything writes**. Gate: `baseline_is_green` — a red baseline is a stop, not a caveat, because nothing downstream could then distinguish a regression from an inherited failure. Also supplies the rollback target (D21). |
+| `codebase-map` node | Parses the target with `ast` into files and symbols. Derived, not described — it is the ground truth the next node is checked against. |
+| `impact-analysis` node | §4.3 of the brief: impacted modules, contract diff, invalidated prior decisions, regression surface, risk. Gate: `every_referenced_symbol_exists` — every symbol it names is checked against the map. Fluent analysis of code that does not exist is the characteristic brownfield failure, and it reads as thorough right up until someone checks. |
+| Restricted fan-out | `impl` fans out over `impact-analysis.affected_modules`: in brownfield the blast radius is discovered, not declared. |
+| Regression gate | Two populations, opposite requirements. New tests **red→green** (the RED gate means something sharper here: a test that does not reproduce the reported defect has not reproduced anything). Existing tests **green→green**, as a set difference against the baseline's failures — `pytest.exit_code == 0` cannot express this. |
+| Breaking-change escalation | `has_breaking_contract_change` on the analysis activates an optional human node. An agent deciding on its own that a break is acceptable is exactly the decision this system does not delegate (D13, D15's sibling). |
+| Approval widened | `design-approval` binds to the impact analysis as well as the design: approving a design without the blast radius it rests on is approving half the decision (D10). |
+| **Rollback path** | `orchestrator rollback <run>` restores the snapshot and then **verifies** it. Exercised here; greenfield has nothing to restore to. |
+| `scaffold` removed | Deriving package stubs from a design would overwrite the live code the run exists to change. |
 
 ### Ambiguous
 Requirement: *"Add rate limiting to protect the service."* Unstated: scope (per IP / key /
@@ -629,6 +634,14 @@ A3 · Rate limit scope
    Recommend: (a). No auth exists, so per-IP limiting on redirects would
               penalize shared-NAT users.
 ```
+
+**Identified, escalated, normalized — three distinct steps.** `intake` extracts questions
+instead of resolving them; `ambiguity-triage` decides which are worth a person's time, at a
+threshold this plan lowers to MEDIUM *in data*; `normalize-clarification` folds the answer
+back into the register as a structured, attributable disposition. Without the third step,
+clarification is theatre: the run stops, a person answers, and design works from the same
+unresolved register. The answer reaches downstream nodes because the scheduler passes a
+`human` node's decision to whatever depends on it.
 
 **Not everything escalates (D13).** Low-severity ambiguities receive agent-proposed
 assumptions with rationale, recorded and propagated into lineage, the evidence bundle, and a
@@ -667,6 +680,9 @@ claimed.
 | **D16** | The plan graph is declarative YAML over six node kinds (§4.7); the engine is fixed | Extension without engine change — new stages, gates, and scenarios are configuration. Keeps the engine small and makes the SDLC readable from one file | A declarative DSL has an expressiveness ceiling; dynamic fan-out needs an explicit construct |
 | **D17** | **Build what's graded, buy what isn't.** Hand-roll the control plane; use existing libraries for worker runtimes, agent harnesses, and every non-graded capability | §4.4 is a list of control-plane properties — that is the differentiator. Reimplementing file/bash tooling, permission layers, and agent loops is a week of undifferentiated work that would consume the time the graded part needs | A dependency on the agent harness's permission model; D6/D7 enforcement is only as good as what it exposes |
 | **D18** | One `Worker` interface behind every node kind, with live / replay / stub implementations | The only way to test a scheduler whose workers are non-deterministic; also makes runs reproducible and the runtime choice swappable (§4.8) | Recorded fixtures drift from real model behaviour and need periodic refresh |
+| **D19** | Scenario plans are **deltas** over one base plan (`extends` / `insert_after` / `override` / `remove`), composed before validation | D16 claims a scenario is data. Three near-identical 180-line plan files would make that technically true and practically false — the second one to drift would prove it. Composing on raw mappings means a scenario is validated exactly like an authored plan; there is no second, weaker path into the scheduler | Reading a scenario means reading two files; a delta can express a graph its author did not picture |
+| **D20** | The target profile is the only place the target is named, and `{target.*}` resolves at load time | D3 says the orchestrator never imports the target; this is what keeps that survivable. Retargeting is a config change, and a resolved plan means `--dry-run` shows the command that will actually run | A plan is not fully readable without its profile |
+| **D21** | The baseline stores file **bodies**, not a reference to them | A rollback that can only name the state it wanted is a rollback in the documentation only. Content also means it works on a dirty tree and needs no VCS | Snapshot size grows with the target; fine at this scale, wrong for a large repo |
 | **D2** | SQLite backs orchestration state, not just target data | Safe-stop resumability and reliability metrics need durable, queryable run state | Single-node only |
 | **D3** | `orchestrator` never imports `shortener`; target specifics in a config profile | Makes generality checkable rather than claimed | Some indirection |
 | **D4** | Exit gates evaluated by a non-producer, preferably a real tool | Agent self-reports are assertions, not evidence | Gates limited to machine-checkable properties |
@@ -815,6 +831,7 @@ nodes:
     stage: design
     role: architect
     needs: [ambiguity-triage]
+    inputs: [intake.artifacts.register]
     output_schema: schemas/design.json
     outputs: [spec, modules]          # gates read design.spec;
                                       # impl fans out over design.modules
@@ -840,7 +857,7 @@ nodes:
     needs: [design-approval]
     run: py:orchestrator.derive.scaffold_from_design
     outputs: [manifest]
-    write_scope: ["target/shortener/**"]
+    write_scope: ["{target.root}/**"]
     gate:                             # G4
       all:
         - "imports.resolve == true"
@@ -852,8 +869,8 @@ nodes:
     role: test-author                 # deliberately NOT the implementer (D5)
     outputs: [suite]                  # gates read tests-acceptance.suite
     needs: [scaffold]
-    inputs: [intake.artifacts.acceptance_criteria]
-    write_scope: ["target/tests/**"]
+    inputs: [intake.artifacts.register]
+    write_scope: ["{target.tests_root}/**"]
     gate:                             # G5 — the RED gate
       all:
         - "pytest.exit_code != 0"     # must FAIL against the scaffold
@@ -867,7 +884,7 @@ nodes:
     template:
       kind: codeagent
       role: implementer
-      write_scope: ["target/shortener/{item.path}/**"]   # D7 blast radius
+      write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
       gate:                           # G6, per module
         all:
           - "ruff.exit_code == 0"
@@ -879,7 +896,7 @@ nodes:
     stage: verification
     needs: [impl]
     run: "sh:{target.commands.test_cov}"
-    freeze_paths: ["target/tests/**"]  # D6: immutable during repair
+    freeze_paths: ["{target.tests_root}/**"]  # D6: immutable during repair
     gate:                              # G7 — the GREEN gate
       all:
         - "pytest.exit_code == 0"
@@ -946,53 +963,113 @@ Two forms of gate appear, as described in §4.7: **expressions** over tool resul
 
 ### The brownfield delta, in full
 
-Adding a scenario means adding nodes — **no new node kinds and no engine change**:
+`plans/brownfield.yaml`, quoted here in the parts that carry the argument. Adding a
+scenario means adding **nodes and overrides — no new node kinds, no engine change**:
 
 ```yaml
 plan: brownfield
 extends: greenfield
 
+rollback:
+  restore_from: baseline-capture          # the node holding the snapshot
+  verify_with: "{target.commands.test}"   # a restore nobody checked is a second change
+
 insert_after:
   intake:
+    - id: baseline-capture                # before anything writes
+      kind: tool
+      run: py:orchestrator.policy.capture_baseline
+      params: {command: "{target.commands.test}", root: "{target.root}"}
+      outputs: [snapshot]
+      gate:
+        all:
+          - predicate: baseline_is_green  # a red baseline is a stop, not a caveat
+
+    - id: codebase-map                    # parsed, not described
+      kind: derive
+      run: py:orchestrator.derive.map_codebase
+      params: {root: "{target.root}"}
+      outputs: [map]
+
     - id: impact-analysis
       kind: agent
       role: codebase-analyst
-      inputs: [target.source, lineage.previous_runs]   # cross-run lineage
-      outputs: [affected_modules, contract_diff, invalidated_decisions,
-                regression_surface, risk_class]
+      inputs: [codebase-map.artifacts.map]
+      outputs: [report, affected_modules]
+      escalate_when:
+        predicate: has_breaking_contract_change
+      on_escalate: breaking-change-review
       gate:
         all:
-          - predicate: every_referenced_symbol_exists   # catches hallucination
+          - predicate: every_referenced_symbol_exists   # checked against the map
 
-    - id: baseline-capture
-      kind: tool
-      run: py:orchestrator.workers.snapshot_tree
-      gate:
-        all:
-          - "pytest.exit_code == 0"       # refuse to start from a red baseline
-      on_fail: safe_stop
+    - id: breaking-change-review
+      kind: human
+      needs: []                           # placed, not spliced — see below
+      optional: true
 
 override:
   impl:
-    from: impact-analysis.artifacts.affected_modules   # narrower fan-out
+    from: impact-analysis.artifacts.affected_modules    # narrower fan-out
   tests:
+    run: py:orchestrator.policy.verify_no_regression
+    inputs: [baseline-capture.artifacts.snapshot]
     gate:
       all:
-        - "pytest.exit_code == 0"
-        - predicate: no_pre_existing_test_regressed     # green → green
+        - "tests.exit_code == 0"
+        - predicate: no_pre_existing_test_regressed
         - predicate: ac_test_matrix_complete
-  design-approval:
-    escalate_when: "contract_diff.breaking == true"     # change control
 
-rollback:
-  restore_from: baseline-capture
-  verify_with: "{target.test_cmd}"
+remove:
+  - scaffold          # deriving stubs would overwrite the code being changed
 ```
 
-Two new nodes and four overrides. The scheduler, gate evaluator, policy engine, lineage
-recorder, and metrics collector are untouched — which is the claim in D16, stated as a
-diff rather than as an assertion.
+Four new nodes, four overrides, one removal. The scheduler, gate evaluator, policy engine,
+lineage recorder, and metrics collector are untouched — the claim in D16, stated as a diff
+rather than as an assertion.
 
-The ambiguous scenario needs even less: no new nodes at all. It traverses the
-`clarify-with-human` branch that greenfield skips, because `escalate_when` on
-`ambiguity-triage` fires. Same plan, different path.
+**Three composition rules earn their keep here.**
+
+*Splicing rewires.* An inserted node goes **between** the anchor and everything that
+depended on it. Without the rewiring, `baseline-capture` would run *alongside* the work it
+is supposed to precede, which is the one thing a baseline must not do.
+
+*A node that declares its own `needs` is placed, not spliced.* `breaking-change-review` is
+an escalation target: it has to hang off the graph rather than sit in it, or every run
+would wait for a question nobody raised.
+
+*Override is shallow, and remove runs last.* A deep merge of a `gate` would silently keep
+base checks a scenario meant to replace. And removal is validated against the **final**
+shape, so a scenario can re-point a node's dependents and then drop it — which is exactly
+what "this scenario does not scaffold" looks like.
+
+`{target.*}` placeholders resolve from the target profile at load time, so `--dry-run`
+prints the command that would actually run. `{item.path}` is left alone: it belongs to
+fan-out materialisation, and is resolved per item at runtime.
+
+### The ambiguous delta
+
+`plans/ambiguous.yaml` changes four things and adds one node. Three of them are the
+scenario:
+
+| Change | Why |
+| --- | --- |
+| `intake` at `effort: high`, gate requires `ambiguities.total > 0` | The work here is noticing what the requirement does not say. An intake that finds nothing has not read it |
+| `ambiguity-triage` with `params: {threshold: medium}` | The escalation threshold is the calibration knob of controlled autonomy (D13). A vague requirement is worth more interruptions than a clear one — and the knob is visible in data, not buried in Python |
+| `clarify-with-human` with `optional: false` | Greenfield asks only when triage escalates; this plan *always* stops. There is no defensible reading to proceed from |
+| **`normalize-clarification`** (new node) | The step that makes clarification more than theatre |
+| `release-readiness` gate adds `no_ambiguity_without_disposition` | An assumption that survives to release must have been surfaced, not inherited |
+
+Normalization is the part worth defending. Without it the run stops, a person answers, and
+every downstream node keeps working from the same unresolved register — the answer lives in
+the audit trail and changes nothing. So a human decision is now **material**: the scheduler
+passes `<node>.decision` to anything that depends on a `human` node, and
+`normalize-clarification` folds the answer back into `intake.register` as a structured,
+attributable disposition per question. Re-emitting an artifact an upstream node already
+produced is what makes this stateful rather than advisory: downstream consumers invalidate
+and approvals bound to the old version go stale (D10).
+
+Answers are matched by ambiguity id (`A1: 302, so browsers do not cache the redirect`).
+An unmatched line is recorded against every still-open question rather than discarded —
+losing what a person said is worse than attributing it a little too widely. Questions the
+answer did not touch stay undisposed, which is what the gate is looking for.

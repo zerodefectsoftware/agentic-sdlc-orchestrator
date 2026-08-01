@@ -13,8 +13,13 @@ import textwrap
 import pytest
 from typer.testing import CliRunner
 
+from orchestrator.artifacts import Baseline
 from orchestrator.cli.main import app
 from orchestrator.config import get_settings, reset_settings
+from orchestrator.lineage import recorder
+from orchestrator.state import store
+from orchestrator.state.artifacts import ArtifactStore
+from orchestrator.state.models import Run, RunStatus
 
 PLAN = """
 plan: demo
@@ -55,7 +60,13 @@ def workspace(tmp_path, monkeypatch):
     prompts.mkdir()
     (prompts / "architect.md").write_text("You design.")
     (tmp_path / "requirement.md").write_text("Build something.")
-    (tmp_path / "target.yaml").write_text("target: {}\n")
+    (tmp_path / "target.yaml").write_text(
+        "target:\n"
+        "  name: demo\n"
+        "  root: target/demo\n"
+        "  tests_root: target/tests\n"
+        "  write_ceiling: ['target/**']\n"
+    )
 
     monkeypatch.setenv("ORCHESTRATOR_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("ORCHESTRATOR_PLANS_DIR", str(plans))
@@ -83,9 +94,12 @@ def start(cli, workspace):
         cli,
         workspace,
         "run",
-        "--plan", str(workspace / "plans" / "demo.yaml"),
-        "--requirement", str(workspace / "requirement.md"),
-        "--target", str(workspace / "target.yaml"),
+        "--plan",
+        str(workspace / "plans" / "demo.yaml"),
+        "--requirement",
+        str(workspace / "requirement.md"),
+        "--target",
+        str(workspace / "target.yaml"),
     )
 
 
@@ -130,8 +144,15 @@ def test_rejecting_stops_the_run(cli, workspace):
     run_id = _latest_run_id(cli, workspace)
 
     output = invoke(
-        cli, workspace, "reject", run_id, "design-approval",
-        "--by", "alice", "--note", "contract is wrong",
+        cli,
+        workspace,
+        "reject",
+        run_id,
+        "design-approval",
+        "--by",
+        "alice",
+        "--note",
+        "contract is wrong",
     )
     assert "rejected" in output
 
@@ -182,9 +203,14 @@ def test_the_real_greenfield_plan_passes_preflight(cli):
 def test_a_dry_run_executes_nothing(cli, workspace):
     """It should be safe to point at a live configuration you cannot yet run."""
     invoke(
-        cli, workspace, "run", "--dry-run",
-        "--plan", str(workspace / "plans" / "demo.yaml"),
-        "--requirement", str(workspace / "requirement.md"),
+        cli,
+        workspace,
+        "run",
+        "--dry-run",
+        "--plan",
+        str(workspace / "plans" / "demo.yaml"),
+        "--requirement",
+        str(workspace / "requirement.md"),
     )
     result = cli.invoke(app, ["runs"])
     assert "demo" not in result.output  # no run was recorded
@@ -192,14 +218,19 @@ def test_a_dry_run_executes_nothing(cli, workspace):
 
 def test_a_dry_run_shows_what_each_node_would_dispatch(cli, workspace):
     output = invoke(
-        cli, workspace, "run", "--dry-run",
-        "--plan", str(workspace / "plans" / "demo.yaml"),
-        "--requirement", str(workspace / "requirement.md"),
+        cli,
+        workspace,
+        "run",
+        "--dry-run",
+        "--plan",
+        str(workspace / "plans" / "demo.yaml"),
+        "--requirement",
+        str(workspace / "requirement.md"),
     )
 
     assert "nothing will execute" in output
     assert "design" in output
-    assert "architect.md" in output      # the prompt it would send
+    assert "architect.md" in output  # the prompt it would send
     assert "RequirementRegister" in output or "Design" in output
 
 
@@ -209,9 +240,7 @@ def test_a_dry_run_needs_no_credential(cli, workspace, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     reset_settings()
 
-    result = cli.invoke(
-        app, ["run", "--dry-run", "--plan", str(workspace / "plans" / "demo.yaml")]
-    )
+    result = cli.invoke(app, ["run", "--dry-run", "--plan", str(workspace / "plans" / "demo.yaml")])
     assert "ANTHROPIC_API_KEY" not in result.output
 
 
@@ -220,9 +249,7 @@ def test_a_dry_run_fails_when_a_node_could_not_dispatch(cli, workspace, monkeypa
     monkeypatch.setenv("ORCHESTRATOR_PROMPTS_DIR", str(workspace / "absent"))
     reset_settings()
 
-    result = cli.invoke(
-        app, ["run", "--dry-run", "--plan", str(workspace / "plans" / "demo.yaml")]
-    )
+    result = cli.invoke(app, ["run", "--dry-run", "--plan", str(workspace / "plans" / "demo.yaml")])
     assert result.exit_code == 1
     assert "problems that would fail a live run" in result.output
 
@@ -308,3 +335,84 @@ def _latest_run_id(cli, workspace) -> str:
 
     with store.Store(get_settings().database_url).session() as session:
         return session.scalar(select(Run).order_by(Run.started_at.desc()).limit(1)).id
+
+
+# --------------------------------------------------------------------------- #
+# rollback — the failure control that is easiest to claim and hardest to mean
+# --------------------------------------------------------------------------- #
+
+
+RESTORE_PLAN = """
+plan: restore
+version: 1
+rollback:
+  restore_from: baseline
+  verify_with: "{verify}"
+nodes:
+  - id: baseline
+    kind: tool
+    stage: requirements
+    run: py:orchestrator.policy.capture_baseline
+    outputs: [snapshot]
+"""
+
+
+def arrange_rollback(workspace, monkeypatch, *, verify: str, body: str = "original\n") -> str:
+    """A run with a recorded baseline, and a target that has since been damaged."""
+    (workspace / "plans" / "restore.yaml").write_text(RESTORE_PLAN.format(verify=verify))
+
+    monkeypatch.chdir(workspace)
+    damaged = workspace / "target" / "demo" / "main.py"
+    damaged.parent.mkdir(parents=True)
+    damaged.write_text("broken\n")
+
+    baseline = Baseline(green=True, snapshot_ref="abc123", files={"target/demo/main.py": body})
+    with store.Store().session() as session:
+        run = store.start_run(
+            session,
+            plan_name="restore",
+            plan_version=1,
+            requirement_path=str(workspace / "requirement.md"),
+            target_profile=str(workspace / "target.yaml"),
+            nodes=[("baseline", "tool", "requirements")],
+        )
+        content = baseline.model_dump_json()
+        artifact = recorder.record_artifact(session, run, name="baseline.snapshot", content=content)
+        artifact.path = str(ArtifactStore().write(run.id, "baseline.snapshot", 1, content))
+        session.flush()
+        return run.id
+
+
+def test_rollback_restores_the_baseline_and_verifies_it(cli, workspace, monkeypatch):
+    """An unverified restore is a second unreviewed change to the target."""
+    run_id = arrange_rollback(workspace, monkeypatch, verify="python3 -c pass")
+
+    output = invoke(cli, workspace, "rollback", run_id)
+
+    assert (workspace / "target" / "demo" / "main.py").read_text() == "original\n"
+    assert "restored and verified" in output
+
+    with store.Store().session() as session:
+        restored = session.get(Run, run_id)
+        assert restored.status is RunStatus.ROLLED_BACK
+        assert "abc123" in restored.stop_reason
+
+
+def test_a_restore_that_fails_verification_says_so(cli, workspace, monkeypatch):
+    """Restoring is not the same as being back in a known-good state."""
+    run_id = arrange_rollback(workspace, monkeypatch, verify="python3 -c exit(1)")
+
+    result = cli.invoke(app, ["rollback", run_id])
+
+    assert result.exit_code == 1
+    assert "verification failed" in result.output
+
+
+def test_a_plan_with_no_restore_point_refuses_to_roll_back(cli, workspace):
+    """Greenfield has nothing to return to, and should say that rather than
+    inventing a definition of 'original'."""
+    start(cli, workspace)
+    result = cli.invoke(app, ["rollback"])
+
+    assert result.exit_code == 1
+    assert "declares no rollback" in result.output

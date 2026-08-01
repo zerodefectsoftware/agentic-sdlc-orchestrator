@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "ContractDiff": {
+      "additionalProperties": false,
+      "description": "What a change does to the target's published interface.\n\n`breaking` is separate from the change list because change control asks a\ndifferent question than review does: not \"what moved\" but \"does anyone\ndownstream have to care\".",
+      "properties": {
+        "added": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Added",
+          "type": "array"
+        },
+        "breaking": {
+          "default": false,
+          "title": "Breaking",
+          "type": "boolean"
+        },
+        "changed": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Changed",
+          "type": "array"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Removed",
+          "type": "array"
+        }
+      },
+      "title": "ContractDiff",
+      "type": "object"
+    },
+    "Module": {
+      "additionalProperties": false,
+      "description": "One unit the implementation fans out over (\u00a75.1).",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "responsibility": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Responsibility"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "title": "Module",
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Severity",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Codebase reasoning (\u00a74.3 of the brief) \u2014 what a change actually touches.\n\n`referenced_symbols` exists to be checked. Hallucinated impact analysis is\nthe characteristic brownfield failure: a confident account of modules and\nfunctions that do not exist, which reads as thorough and is worthless. Naming\nthem explicitly makes the claim falsifiable against the repository.",
+  "properties": {
+    "affected_modules": {
+      "items": {
+        "$ref": "#/$defs/Module"
+      },
+      "title": "Affected Modules",
+      "type": "array"
+    },
+    "contract_diff": {
+      "$ref": "#/$defs/ContractDiff"
+    },
+    "invalidated_decisions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Invalidated Decisions",
+      "type": "array"
+    },
+    "referenced_symbols": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Referenced Symbols",
+      "type": "array"
+    },
+    "regression_surface": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Regression Surface",
+      "type": "array"
+    },
+    "risk": {
+      "$ref": "#/$defs/Severity",
+      "default": "medium"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "summary"
+  ],
+  "title": "ImpactAnalysis",
+  "type": "object"
+}

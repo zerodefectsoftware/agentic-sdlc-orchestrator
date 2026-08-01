@@ -11,7 +11,7 @@ load time with a precise message, not silently disable a gate.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -203,6 +203,7 @@ class Node(BaseModel):
     # Kind-specific configuration
     role: str | None = None                            # agent, codeagent
     run: str | None = None                             # tool
+    params: dict[str, Any] = Field(default_factory=dict)   # arguments for a py: task
     from_: str | None = Field(default=None, alias="from")  # derive, fanout
     template: NodeTemplate | None = None               # fanout
     presents: list[str] = Field(default_factory=list)  # human
@@ -305,6 +306,18 @@ class Defaults(BaseModel):
     autonomy: Autonomy = Autonomy.AUTO
 
 
+class RollbackPolicy(BaseModel):
+    """How a run restores the target after an unrecoverable failure (§6).
+
+    Only meaningful where there is prior state to return to, which is why
+    greenfield does not declare one — there is nothing to restore.
+    """
+
+    model_config = _STRICT
+    restore_from: str          # the node whose snapshot is the baseline
+    verify_with: str           # a command that must pass before rollback is believed
+
+
 class Plan(BaseModel):
     """A plan graph: intent, versioned and authored (§3)."""
 
@@ -314,6 +327,7 @@ class Plan(BaseModel):
     version: int
     description: str | None = None
     defaults: Defaults = Field(default_factory=Defaults)
+    rollback: RollbackPolicy | None = None
     nodes: list[Node]
 
     @property

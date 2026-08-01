@@ -166,7 +166,100 @@ class SecurityReport(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
 
 
+# --------------------------------------------------------------------------- #
+# brownfield
+# --------------------------------------------------------------------------- #
+
+
+class ContractDiff(BaseModel):
+    """What a change does to the target's published interface.
+
+    `breaking` is separate from the change list because change control asks a
+    different question than review does: not "what moved" but "does anyone
+    downstream have to care".
+    """
+
+    model_config = _STRICT
+
+    breaking: bool = False
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    changed: list[str] = Field(default_factory=list)
+
+
+class ImpactAnalysis(BaseModel):
+    """Codebase reasoning (§4.3 of the brief) — what a change actually touches.
+
+    `referenced_symbols` exists to be checked. Hallucinated impact analysis is
+    the characteristic brownfield failure: a confident account of modules and
+    functions that do not exist, which reads as thorough and is worthless. Naming
+    them explicitly makes the claim falsifiable against the repository.
+    """
+
+    model_config = _STRICT
+
+    summary: str
+    affected_modules: list[Module] = Field(default_factory=list)
+    referenced_symbols: list[str] = Field(default_factory=list)  # paths, checked to exist
+    contract_diff: ContractDiff = Field(default_factory=ContractDiff)
+    invalidated_decisions: list[str] = Field(default_factory=list)  # prior decision ids
+    regression_surface: list[str] = Field(default_factory=list)     # test ids at risk
+    risk: Severity = Severity.MEDIUM
+
+
+class Baseline(BaseModel):
+    """The state a rollback returns to.
+
+    Recorded before anything is touched. A run that starts from a red baseline
+    cannot attribute later failures to its own change, which is why the gate
+    refuses rather than proceeding with a caveat.
+
+    `files` holds the bodies, not a reference to them: a rollback that can only
+    name the state it wanted is a rollback in the documentation only.
+    """
+
+    model_config = _STRICT
+
+    green: bool
+    snapshot_ref: str                                    # content hash of `files`
+    failing: list[str] = Field(default_factory=list)     # test ids red before the change
+    files: dict[str, str] = Field(default_factory=dict)  # path -> body
+
+
+class Symbol(BaseModel):
+    model_config = _STRICT
+
+    name: str
+    kind: str          # "def" | "class"
+    line: int
+
+
+class CodeMap(BaseModel):
+    """What exists in the target today.
+
+    Derived, not described. An analyst agent reasons over this rather than over
+    the filesystem, which is what lets `every_referenced_symbol_exists` check the
+    analysis against something that was not written by the thing being checked
+    (D4).
+    """
+
+    model_config = _STRICT
+
+    root: str
+    files: dict[str, list[Symbol]] = Field(default_factory=dict)
+
+    @property
+    def symbol_refs(self) -> set[str]:
+        """Every addressable name, as `path` and `path::symbol`."""
+        refs: set[str] = set()
+        for path, symbols in self.files.items():
+            refs.add(path)
+            refs.update(f"{path}::{symbol.name}" for symbol in symbols)
+        return refs
+
+
 SCHEMAS: dict[str, type[BaseModel]] = {
+    "impact_analysis": ImpactAnalysis,
     "requirement_register": RequirementRegister,
     "design": Design,
     "acceptance_suite": AcceptanceSuite,

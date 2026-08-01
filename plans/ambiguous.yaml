@@ -1,0 +1,133 @@
+# Ambiguous plan graph — a requirement too vague to build from.
+#
+# "Add rate limiting to protect the service." Rate limit what — by IP, by API
+# key, by short code? Protect against what — abuse, cost, or accidental load?
+# What happens at the limit: 429, queue, or degrade? None of that is inferable,
+# and a system that picks silently produces a confident implementation of a
+# requirement nobody wrote.
+#
+# The brief asks this scenario to show ambiguity *identified and normalized*.
+# Those are three distinct steps in this graph, and they are separate on purpose:
+#
+#   identified   — intake extracts questions instead of resolving them
+#   escalated    — triage decides which ones are worth a person's time (D13),
+#                  at a threshold this plan deliberately lowers
+#   normalized   — the answer is folded back into the register as a structured,
+#                  attributable disposition, and everything downstream reads it
+#
+# Nothing else changes. That is the point of a delta plan: the ambiguous
+# scenario is the greenfield SDLC with its clarification path made mandatory,
+# not a second SDLC that happens to look similar.
+
+plan: ambiguous
+extends: greenfield
+version: 1
+description: A vague requirement, surfaced and normalized before anything is built.
+
+override:
+
+  # Depth where it pays: the hard part of this scenario is noticing what the
+  # requirement does not say. Greenfield runs intake at medium effort because
+  # structured extraction from a clear brief adds little; here it is the work.
+  intake:
+    id: intake
+    kind: agent
+    stage: requirements
+    role: analyst
+    output_schema: schemas/requirement_register.json
+    outputs: [register]
+    effort: high
+    gate:                               # G1
+      all:
+        - predicate: schema_valid
+        - predicate: every_requirement_has_testable_ac
+        - "ambiguities.total > 0"       # see below
+
+  # A lower threshold, stated in data. MEDIUM and above now reach a person,
+  # where greenfield escalates only HIGH. The knob that decides how much
+  # autonomy the system takes should be visible to a reviewer without reading
+  # any Python — this line is that.
+  ambiguity-triage:
+    id: ambiguity-triage
+    kind: tool
+    stage: requirements
+    needs: [intake]
+    run: py:orchestrator.policy.triage_ambiguities
+    params:
+      threshold: medium
+    escalate_when:
+      predicate: has_high_severity_ambiguity
+    on_escalate: clarify-with-human
+    gate:                               # G2
+      all:
+        - predicate: no_ambiguity_without_disposition
+
+  # Not optional here. Greenfield instantiates this node only when triage
+  # escalates; this plan always stops to ask, because a requirement this vague
+  # has no defensible reading to proceed from.
+  clarify-with-human:
+    id: clarify-with-human
+    kind: human
+    stage: requirements
+    needs: [ambiguity-triage]
+    optional: false
+    autonomy: APPROVE
+    presents: [intake.artifacts.register]
+
+  # Reads the normalized register, not the raw one — and cannot start until
+  # normalization has happened, which is the whole reason that node exists.
+  design:
+    id: design
+    kind: agent
+    stage: design
+    role: architect
+    needs: [normalize-clarification]
+    inputs: [intake.artifacts.register]
+    output_schema: schemas/design.json
+    outputs: [spec, modules]
+    gate:                               # G3
+      all:
+        - predicate: requirement_design_matrix_complete
+        - predicate: no_unmapped_design_elements
+
+  # An assumption that survives to release must have been surfaced, not
+  # inherited. The register travels in the evidence bundle either way; this
+  # makes it a condition of shipping rather than a document somebody might read.
+  release-readiness:
+    id: release-readiness
+    kind: derive
+    stage: release
+    needs: [tests, docs, security]
+    emits: evidence_bundle
+    gate:                               # G10
+      all:
+        - predicate: all_upstream_gates_green
+        - predicate: no_unapproved_high_findings
+        - predicate: no_ambiguity_without_disposition
+        - predicate: lineage_complete
+        - predicate: no_node_in_nonterminal_state
+        - predicate: no_stale_approvals
+
+insert_after:
+
+  clarify-with-human:
+    # Normalization. Without it, clarification is theatre: the run stops, a
+    # person answers, and the answer sits in the audit trail while every
+    # downstream node keeps working from the unresolved register.
+    #
+    # Re-emitting `intake.register` is what makes this stateful rather than
+    # advisory — it is a new version of an artifact upstream nodes already
+    # produced, so anything downstream that had consumed the old one is
+    # invalidated and any approval bound to it goes stale (D10).
+    - id: normalize-clarification
+      kind: tool
+      stage: requirements
+      run: py:orchestrator.policy.normalize_clarification
+      params:
+        checkpoint: clarify-with-human
+      inputs: [intake.artifacts.register]
+      outputs: [register]
+      gate:                             # A1
+        all:
+          - "clarification.resolved > 0"      # the checkpoint produced an answer
+          - predicate: no_ambiguity_without_disposition
