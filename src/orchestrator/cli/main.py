@@ -566,6 +566,55 @@ def retry(
 
 
 @app.command()
+def invalidate(
+    run_id: Annotated[str, typer.Argument()],
+    nodes: Annotated[list[str], typer.Argument(help="Nodes whose result is not to be trusted")],
+    by: Annotated[str, typer.Option(help="Who is deciding — recorded in the audit trail")],
+    why: Annotated[str, typer.Option(help="Why the recorded result is wrong")],
+) -> None:
+    """Withdraw a passing result and re-enter the work.
+
+    The counterpart to `retry`, and the one that has to exist for a gate to be
+    correctable. `retry` deliberately refuses a passed node: re-running work
+    until it agrees with you is how a green run gets manufactured. This is the
+    safe direction — it makes a run *less* green, never more.
+
+    It is what you reach for when the gate itself was wrong. Seven implementers
+    passed a lint check on modules they had never written, because a harness
+    fault stopped every write and no gate asked whether anything had been
+    written. Fixing the gate does not un-record the green those nodes already
+    have; this does.
+
+    Everything downstream of an invalidated node goes STALE, for the same reason
+    a re-derived artifact invalidates its consumers (§6): a result computed from
+    something withdrawn is not evidence.
+    """
+    with store.Store().session() as session:
+        run = _resolve(session, run_id)
+        for node_id in nodes:
+            execution = store.get_node(session, run, node_id)
+            if execution is None:
+                raise typer.BadParameter(f"run has no node '{node_id}'")
+
+            recorder.decide(
+                session,
+                recorder.request_approval(session, run, node_id=node_id, artifacts=[]),
+                decision=Decision.REJECTED,
+                decided_by=by,
+                note=f"result withdrawn: {why}",
+            )
+            execution.status = NodeStatus.PENDING
+            console.print(f"[yellow]withdrawn[/yellow] {node_id} — re-entering")
+
+        run.status = RunStatus.RUNNING
+        run.stop_reason = None
+        session.flush()
+
+    console.print(f"[dim]{len(nodes)} results withdrawn by {by}: {why}[/dim]")
+    console.print("[dim]run `orchestrator resume` when the harness is ready[/dim]")
+
+
+@app.command()
 def resume(run_id: Annotated[str | None, typer.Argument()] = None) -> None:
     """Continue a run that stopped at a checkpoint."""
     _advance(run_id)

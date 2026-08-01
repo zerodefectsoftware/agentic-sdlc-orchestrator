@@ -532,3 +532,30 @@ def test_releasing_a_stale_escalation_cannot_demote_a_passed_node(cli, workspace
     with store.Store().session() as session:
         run = session.get(Run, run_id)
         assert store.get_node(session, run, "build").status is NodeStatus.PASSED
+
+
+def test_a_passing_result_can_be_withdrawn_when_the_gate_was_wrong(cli, workspace):
+    """The counterpart to retry, and the reason retry can safely refuse a
+    passed node: this direction makes a run less green, never more.
+
+    Seven implementers once passed a lint check on modules they had never
+    written. Fixing the gate does not un-record the green they already had.
+    """
+    start(cli, workspace)
+    with store.Store().session() as session:
+        run_id = session.scalars(select(Run)).all()[-1].id
+        assert store.get_node(session, session.get(Run, run_id), "design").status is (
+            NodeStatus.PASSED
+        )
+
+    output = invoke(
+        cli, workspace, "invalidate", run_id, "design",
+        "--by", "ops", "--why", "the gate never checked whether anything was written",
+    )
+
+    assert "withdrawn" in output
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "design").status is NodeStatus.PENDING
+        rejected = [a for a in run.approvals if a.node_id == "design" and a.note]
+        assert "result withdrawn" in rejected[-1].note
