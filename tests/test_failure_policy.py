@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from orchestrator.engine.plan import Node
+from orchestrator.engine.plan import Autonomy, Node, NodeKind, Stage
 from orchestrator.gates.evaluator import Verdict
-from orchestrator.policy.failure import Action, respond_to
+from orchestrator.policy.failure import (
+    ESCALATION_PREFIX,
+    Action,
+    escalation_node,
+    respond_to,
+)
 
 
 def node(**overrides) -> Node:
@@ -106,6 +111,55 @@ def test_error_policy_cannot_declare_a_fix_node():
     """The plan schema forbids it, so it cannot be misconfigured."""
     with pytest.raises(ValueError, match="insert"):
         node(on_error={"insert": "fix", "retries": 1})
+
+
+# --------------------------------------------------------------------------- #
+# escalation is a node, not a status
+# --------------------------------------------------------------------------- #
+
+
+def test_escalation_produces_a_human_node():
+    """§3: nothing executes outside the graph. A run parked in a status with a
+    note attached would be an exception to that."""
+    failing = node(retry_budget=0, outputs=["coverage_report"])
+    response = respond_to(Verdict.FAIL, failing, attempt=1)
+    escalation = escalation_node(failing, response, attempt=1)
+
+    assert escalation.kind is NodeKind.HUMAN
+    assert escalation.autonomy is Autonomy.APPROVE
+    assert escalation.needs == ["tests"]
+    assert escalation.optional
+
+
+def test_escalation_inherits_the_stage_of_the_work_that_escalated():
+    """Metrics grouped by stage should attribute the handoff to verification,
+    not to a category of its own."""
+    failing = node(stage="verification")
+    escalation = escalation_node(failing, respond_to(Verdict.FAIL, failing, attempt=1), attempt=1)
+    assert escalation.stage is Stage.VERIFICATION
+
+
+def test_escalation_presents_the_gate_record_and_the_outputs():
+    """A human asked to decide needs to see why, not just that."""
+    failing = node(outputs=["coverage_report"])
+    escalation = escalation_node(failing, respond_to(Verdict.FAIL, failing, attempt=1), attempt=1)
+    assert escalation.presents == ["tests.gate_record", "coverage_report"]
+
+
+def test_escalation_ids_do_not_collide_across_attempts():
+    """Re-planning can re-run a node and escalate again; (run_id, node_id) is unique."""
+    failing = node()
+    first = escalation_node(failing, respond_to(Verdict.FAIL, failing, attempt=1), attempt=1)
+    second = escalation_node(failing, respond_to(Verdict.FAIL, failing, attempt=3), attempt=3)
+    assert first.id != second.id
+    assert first.id.startswith(ESCALATION_PREFIX)
+
+
+def test_an_error_escalation_is_the_same_shape_as_a_failure_escalation():
+    """Both hand off to a human; only the reason differs."""
+    failing = node()
+    from_error = escalation_node(failing, respond_to(Verdict.ERROR, failing, attempt=1), attempt=1)
+    assert from_error.kind is NodeKind.HUMAN
 
 
 # --------------------------------------------------------------------------- #

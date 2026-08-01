@@ -152,8 +152,14 @@ structural rather than narrated.
 - **Cross-cutting services** — policy engine, lineage store, metrics, audit log. Available
   to every node; modeling them as nodes would give edges from everything to everything.
 - **Dynamically inserted nodes** *are* nodes — they simply weren't in the template (§6).
+  Fan-out children, repair nodes, and **escalations** all arrive this way.
 
 Nothing executes outside the graph; plenty exists outside it.
+
+That rule has teeth: an escalation could easily have been a run status with a note attached,
+and instead inserts a `human` node (§6). The payoff is uniformity — every human interaction,
+whether a planned checkpoint, a clarification, or an unplanned handoff, appears in the graph
+and in the evidence bundle with a decider, a timestamp, and lineage.
 
 ---
 
@@ -528,6 +534,24 @@ declare a fix node, so it cannot be misconfigured.
 
 The one exception is genuinely transient harness failure — a test command that crashed
 before recording an exit code — for which `on_error.retries` exists, defaulting to `0`.
+
+### Escalation inserts a node
+
+When a budget is exhausted, the run does not park in a status. It **inserts a `human` node**
+— `escalate:<node>#<attempt>` — depending on the node that escalated, inheriting its stage,
+and presenting the gate record plus that node's outputs.
+
+Three consequences:
+
+- **Uniformity.** Planned checkpoints, clarifications, and unplanned handoffs are all `human`
+  nodes. One mechanism, one audit shape, one CLI surface.
+- **Attribution.** Inheriting the stage means metrics attribute the handoff to the phase whose
+  work stalled, rather than to a category of its own.
+- **Waivers stay human.** For a node with `may_waive: false` (D15), this node is the only
+  route by which a finding can be waived at all — and a person is doing it, on the record.
+
+Approve means the human accepts the state and the run proceeds past the failed node; reject
+stops the run.
 
 | Control | Behaviour |
 | --- | --- |

@@ -17,10 +17,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from orchestrator.engine.plan import ErrorPolicy, Node
+from orchestrator.engine.plan import Autonomy, ErrorPolicy, Node, NodeKind
 from orchestrator.gates.evaluator import Verdict
 
 _DEFAULT_ERROR_POLICY = ErrorPolicy()
+
+ESCALATION_PREFIX = "escalate"
 
 
 class Action(StrEnum):
@@ -59,6 +61,35 @@ def respond_to(verdict: Verdict, node: Node, *, attempt: int) -> Response:
         return _respond_to_error(node, attempt)
 
     return _respond_to_failure(node, attempt)
+
+
+def escalation_node(node: Node, response: Response, *, attempt: int) -> Node:
+    """Build the `human` node an escalation inserts.
+
+    §3 says nothing executes outside the graph, and a run that silently parks in
+    a BLOCKED status with a note attached would break that. Making escalation a
+    node means every human interaction — planned checkpoint, clarification, or
+    unplanned handoff — is uniform: it appears in the graph, in the evidence
+    bundle, with a decider, a timestamp, and lineage.
+
+    It inherits the escalating node's stage, because the work still belongs to
+    that phase. Metrics that group by stage should attribute the handoff to
+    verification, not to a category of its own.
+
+    The decision means: **approve** — the human accepts the state and the run
+    proceeds past the failed node; **reject** — the run stops. For a node whose
+    `may_waive` is false (D15), this is the only route by which the finding can
+    be waived at all, and it is a human doing it.
+    """
+    return Node(
+        id=f"{ESCALATION_PREFIX}:{node.id}#{attempt}",
+        kind=NodeKind.HUMAN,
+        stage=node.stage,
+        autonomy=Autonomy.APPROVE,
+        needs=[node.id],
+        optional=True,  # materialised only when something escalates to it
+        presents=[f"{node.id}.gate_record", *node.outputs],
+    )
 
 
 def _respond_to_error(node: Node, attempt: int) -> Response:

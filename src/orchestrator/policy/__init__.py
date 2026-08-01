@@ -3,8 +3,17 @@
 The gate reaches a verdict; policy decides the consequence. That separation is
 what lets a HIGH security finding force an approval on a node whose default is
 REVIEW — and it keeps the evaluator ignorant of retry budgets.
+
+Escalation inserts a `human` node rather than parking the run in a status, so
+every human interaction is uniform in the graph and in the evidence bundle.
 """
 
-from orchestrator.policy.failure import Action, Response, respond_to
+from orchestrator.policy.failure import (
+    ESCALATION_PREFIX,
+    Action,
+    Response,
+    escalation_node,
+    respond_to,
+)
 
-__all__ = ["Action", "Response", "respond_to"]
+__all__ = ["ESCALATION_PREFIX", "Action", "Response", "escalation_node", "respond_to"]
