@@ -253,8 +253,11 @@ class Node(BaseModel):
             if not value:
                 raise ValueError(f"node '{self.id}' of kind '{self.kind}' requires '{field}'")
 
-        if self.kind is NodeKind.DERIVE and not (self.from_ or self.run):
-            raise ValueError(f"node '{self.id}' of kind 'derive' requires 'from' or 'run'")
+        if self.kind is NodeKind.DERIVE and not (self.from_ or self.run or self.emits):
+            raise ValueError(
+                f"node '{self.id}' of kind 'derive' requires 'from', 'run', or 'emits' — "
+                f"a derivation must say where its output comes from"
+            )
 
         if self.kind is NodeKind.HUMAN and self.autonomy not in (None, Autonomy.APPROVE):
             raise ValueError(

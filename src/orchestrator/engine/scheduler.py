@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 from orchestrator.config import get_settings
 from orchestrator.engine.loader import dependency_graph
 from orchestrator.engine.plan import Gate, Node, NodeKind, Plan
+from orchestrator.evidence.render import render_json
 from orchestrator.gates import GateResult, Verdict, evaluate_gate
 from orchestrator.gates.facts import FactSet
 from orchestrator.gates.registry import PredicateContext, PredicateRegistry
@@ -51,6 +52,15 @@ TERMINAL = (NodeStatus.PASSED, NodeStatus.SKIPPED)
 
 class SchedulerError(Exception):
     """The run cannot proceed for a structural reason, not a gate verdict."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Produced:
+    """The shape `_store` expects, for artifacts the engine itself produces."""
+
+    name: str
+    content: str
+    path: str | None = None
 
 
 @dataclass(slots=True)
@@ -218,6 +228,10 @@ class Scheduler:
             self._expand(session, run, node, execution)
             return
 
+        if node.emits == "evidence_bundle":
+            self._emit_evidence(session, run, node, execution)
+            return
+
         attempt = store.begin_attempt(
             session,
             execution,
@@ -330,6 +344,47 @@ class Scheduler:
             )
             for index, item in enumerate(items)
         ]
+
+    def _emit_evidence(self, session: Session, run: Run, node: Node, execution) -> None:
+        """Assemble the bundle, then gate on it.
+
+        Not a worker task: assembly reads run state, lineage, gate records, and
+        artifacts, and handing a worker thread the session to do that would move
+        database access off the one thread that owns it for no gain.
+        """
+        from orchestrator.evidence import assemble
+
+        attempt = store.begin_attempt(session, execution, worker="engine")
+        bundle = assemble(session, run)
+
+        verdict, gate_result = self._evaluate(session, run, node, Outcome(node=node))
+        if gate_result is not None:
+            store.record_gate(
+                session,
+                attempt,
+                verdict=str(gate_result.verdict),
+                evaluator=gate_result.evaluator,
+                checks=[
+                    {
+                        "check": check.check,
+                        "verdict": str(check.verdict),
+                        "detail": check.detail,
+                        "observed": check.observed,
+                    }
+                    for check in gate_result.checks
+                ],
+            )
+
+        if verdict is Verdict.PASS:
+            self._store(
+                session,
+                run,
+                attempt,
+                _Produced(f"{node.id}.evidence", render_json(bundle)),
+            )
+
+        store.finish_attempt(session, attempt, status=_status_for(verdict))
+        self._apply_policy(session, run, node, execution, verdict, attempt.number, {})
 
     def _evaluate(
         self, session: Session, run: Run, node: Node, outcome: Outcome

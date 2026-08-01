@@ -281,7 +281,7 @@ def test_human_and_fanout_never_reach_a_worker():
     node = Node.model_validate(
         {"id": "accept", "kind": "human", "stage": "release", "autonomy": "APPROVE"}
     )
-    with pytest.raises(WorkerError, match="no live runtime"):
+    with pytest.raises(WorkerError, match="handled by the scheduler"):
         LiveWorker().run(node, {}, SCOPE)
 
 

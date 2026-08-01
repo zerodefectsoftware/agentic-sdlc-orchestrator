@@ -19,7 +19,9 @@ from orchestrator.workers.base import (
     WorkScope,
 )
 from orchestrator.workers.codeagent import CodeAgentWorker
+from orchestrator.workers.command import CommandWorker
 from orchestrator.workers.live import LiveWorker
+from orchestrator.workers.pytask import PyWorker, Task, TaskOutput
 from orchestrator.workers.replay import RecordingWorker, ReplayWorker
 from orchestrator.workers.stub import StubWorker
 from orchestrator.workers.tool import ToolWorker
@@ -27,6 +29,10 @@ from orchestrator.workers.tool import ToolWorker
 __all__ = [
     "AgentWorker",
     "CodeAgentWorker",
+    "CommandWorker",
+    "PyWorker",
+    "Task",
+    "TaskOutput",
     "LiveWorker",
     "ProducedArtifact",
     "RecordingWorker",

@@ -343,7 +343,7 @@ def test_duplicate_ids_are_rejected(tmp_path):
         ),
         (
             "      - id: x\n        kind: derive\n        stage: implementation\n",
-            "requires 'from' or 'run'",
+            "requires 'from', 'run', or 'emits'",
         ),
     ],
 )

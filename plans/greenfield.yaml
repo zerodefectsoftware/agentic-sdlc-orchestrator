@@ -73,10 +73,11 @@ nodes:
 
   # ── Build ───────────────────────────────────────────────────────────────
   - id: scaffold
-    kind: derive                      # deterministic: models from the contract
+    kind: derive                      # deterministic generation (D8), no model call
     stage: implementation
     needs: [design-approval]
-    from: design.artifacts.openapi
+    run: py:orchestrator.derive.scaffold_from_design
+    outputs: [manifest]
     write_scope: ["target/shortener/**"]
     gate:                             # G4
       all:
@@ -160,8 +161,7 @@ nodes:
     kind: derive                      # deterministic by design (D9)
     stage: release
     needs: [tests, docs, security]    # sync barrier — needs is the join
-    run: py:orchestrator.evidence.assemble
-    emits: evidence_bundle
+    emits: evidence_bundle            # assembled by the engine: it reads four stores
     gate:                             # G10
       all:
         - predicate: all_upstream_gates_green

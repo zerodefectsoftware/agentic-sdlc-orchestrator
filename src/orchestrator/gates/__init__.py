@@ -21,6 +21,7 @@ from orchestrator.gates.evaluator import (
 )
 from orchestrator.gates.facts import Fact, FactSet, FactSource, tool_facts
 from orchestrator.gates.registry import PredicateRegistry, UnknownPredicate, registry
+from orchestrator.gates.security import security_scan
 
 __all__ = [
     "CheckResult",
@@ -33,6 +34,7 @@ __all__ = [
     "Verdict",
     "evaluate_gate",
     "registry",
+    "security_scan",
     "required_predicates",
     "tool_facts",
 ]
