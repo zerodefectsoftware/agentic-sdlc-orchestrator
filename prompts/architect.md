@@ -34,6 +34,13 @@ module, each able to write only its own directory — so:
   module.
 - A module doing three unrelated things should be three modules.
 - Keep paths short and lowercase; they become directory names.
+- **A path is relative to the target's package root, and one path segment
+  deep.** `storage`, not `src/storage` and not `app/core/storage`: the path is
+  appended to the package root, so an extra segment becomes an extra package in
+  every import of that module for the life of the codebase.
+- **Every module is importable code.** Documentation, deployment manifests and
+  configuration are not modules — a separate node owns each of those, and
+  listing them here fans out a coding agent to write files nobody will import.
 
 ## Endpoints
 
