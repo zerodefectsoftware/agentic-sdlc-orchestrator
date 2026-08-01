@@ -507,6 +507,28 @@ shipped one. Release *readiness* is the correct endpoint.
 
 ### Controls
 
+**A gate reaches a verdict; policy decides the consequence.** That separation is what lets
+a HIGH security finding force an approval on a node whose default is `REVIEW`, and it keeps
+the evaluator ignorant of retry budgets.
+
+The three verdicts get three different responses, and conflating the last two is a real
+trap:
+
+| Verdict | Meaning | Response |
+| --- | --- | --- |
+| `PASS` | The check ran and held | Proceed |
+| `FAIL` | The check ran and did not hold | Repair loop — the work may be wrong, and a fix node might fix it |
+| `ERROR` | The check **could not be performed** | **Escalate. No fix node.** |
+
+**`ERROR` never enters the repair loop.** A missing fact, an unimplemented predicate, or a
+broken evaluator is exactly as missing on the second attempt. Running repair against it
+burns the retry budget, spends model calls, and delays the real signal — which is that the
+*harness* needs attention, not the work. The plan schema enforces this: `on_error` cannot
+declare a fix node, so it cannot be misconfigured.
+
+The one exception is genuinely transient harness failure — a test command that crashed
+before recording an exit code — for which `on_error.retries` exists, defaulting to `0`.
+
 | Control | Behaviour |
 | --- | --- |
 | **Bounded retry** | Re-run with failure output as added context. Never the identical prompt — that is hoping the sampler is kinder. Budget per node, typically 2. |

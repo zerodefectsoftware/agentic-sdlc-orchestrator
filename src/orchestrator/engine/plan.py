@@ -131,14 +131,42 @@ class Gate(BaseModel):
         return [*self.all_checks, *self.any_checks]
 
 
+TerminalAction = Literal["escalate", "safe_stop", "rollback"]
+
+
 class RepairPolicy(BaseModel):
-    """What happens when a gate fails: bounded retry, then a terminal control (§6)."""
+    """What happens when a gate **fails** — the check ran and did not hold.
+
+    A failing gate means the work is wrong, so a fix node is a reasonable
+    response. Bounded, then a terminal control (§6).
+
+    This applies to FAIL only. See `ErrorPolicy` for the other case.
+    """
 
     model_config = _STRICT
     insert: str
     scoped_to: str | None = None
     max_attempts: int = Field(default=2, ge=1)
-    then: Literal["escalate", "safe_stop", "rollback"] = "escalate"
+    then: TerminalAction = "escalate"
+
+
+class ErrorPolicy(BaseModel):
+    """What happens when a gate **errors** — the check could not be performed.
+
+    Deliberately cannot insert a fix node. A fix node is a code change, and an
+    ERROR is not a code problem: an unimplemented predicate or a missing fact is
+    exactly as missing on the second attempt. Running the repair loop against it
+    burns the retry budget, spends model calls, and delays the real signal —
+    which is that the *harness* needs attention, not the work.
+
+    `retries` exists for genuinely transient harness failures (a test command
+    that crashed before recording an exit code). It defaults to 0, because the
+    common causes of ERROR are deterministic.
+    """
+
+    model_config = _STRICT
+    retries: int = Field(default=0, ge=0)
+    then: TerminalAction = "escalate"
 
 
 class NodeTemplate(BaseModel):
@@ -182,7 +210,8 @@ class Node(BaseModel):
     # Gates
     entry_gate: Gate | None = None
     gate: Gate | None = None                           # the exit gate
-    on_fail: RepairPolicy | None = None
+    on_fail: RepairPolicy | None = None                # gate said no
+    on_error: ErrorPolicy | None = None                # gate could not be evaluated
 
     # Governance
     autonomy: Autonomy | None = None
