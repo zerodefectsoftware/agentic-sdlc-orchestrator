@@ -105,6 +105,16 @@ class ScopeGuard:
         return True, ""
 
 
+async def _streamed(text: str):
+    """The one-message streaming form the permission callback requires."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": text},
+        "parent_tool_use_id": None,
+        "session_id": "default",
+    }
+
+
 class CodeAgentWorker:
     """Executes `codeagent` nodes as a scoped Claude Agent SDK session."""
 
@@ -175,13 +185,21 @@ class CodeAgentWorker:
     async def _converse(
         self, node: Node, prompt: str, inputs: WorkInputs, guard: ScopeGuard
     ) -> dict[str, Any]:
+        """Drive one scoped session to completion.
+
+        The input is streamed rather than passed as a string, because that is
+        what `can_use_tool` requires — the SDK refuses the callback outright in
+        single-shot mode. Since the callback *is* how D6 and D7 are enforced,
+        the streaming form is not a preference here: a string prompt would mean
+        an unscoped agent, which is the one thing this worker will not run.
+        """
         query, options = self._sdk(node, prompt, guard)
 
         terminal_reason = None
         subtype = None
         turns = 0
 
-        async for message in query(prompt=render_inputs(inputs), options=options):
+        async for message in query(prompt=_streamed(render_inputs(inputs)), options=options):
             turns += 1
             # Identified by shape rather than by imported type: this module must
             # not require the SDK to be installed in order to be tested.

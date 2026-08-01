@@ -8,6 +8,8 @@ runtime.
 
 from __future__ import annotations
 
+import asyncio
+
 import json
 from pathlib import Path
 
@@ -243,3 +245,40 @@ def test_a_session_that_never_ends_is_bounded(prompts):
 
     with pytest.raises(WorkerError, match="exceeded"):
         worker(hanging, prompts, timeout_s=1).run(node(), {}, scope())
+
+
+def test_the_prompt_is_streamed_because_the_scope_guard_requires_it(prompts):
+    """The first live session failed on exactly this.
+
+    `can_use_tool` is refused outright in single-shot mode — and that callback
+    *is* how D6 and D7 are enforced, so a string prompt would mean an unscoped
+    agent. The streaming form is a requirement here, not a preference.
+    """
+    captured = {}
+
+    def build(node, prompt, guard):
+        async def query(*, prompt, options):
+            captured["prompt"] = prompt
+            yield ResultMessage()
+
+        return query, {}
+
+    worker(build, prompts).run(node(), {"design.spec": "{}"}, scope())
+
+    streamed = captured["prompt"]
+    assert hasattr(streamed, "__anext__"), "prompt must be an async iterable"
+
+    messages = asyncio.run(_drain(streamed))
+    assert messages == [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": messages[0]["message"]["content"]},
+            "parent_tool_use_id": None,
+            "session_id": "default",
+        }
+    ]
+    assert "design.spec" in messages[0]["message"]["content"]
+
+
+async def _drain(stream) -> list[dict]:
+    return [message async for message in stream]
