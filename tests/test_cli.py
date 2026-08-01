@@ -471,3 +471,40 @@ def test_approving_an_error_escalation_re_enters_the_node(cli, workspace):
     with store.Store().session() as session:
         run = session.get(Run, run_id)
         assert store.get_node(session, run, "build").status is NodeStatus.PENDING
+
+
+def test_a_failed_node_can_be_re_entered_after_the_fix(cli, workspace):
+    """The verb the escalation checkpoint was missing.
+
+    Approve means accept and move on; reject means stop. Neither says "the
+    generator was wrong, I fixed it, run that node again" — which is what an
+    operator does most often, and doing it by hand in the database is not an
+    audit trail.
+    """
+    run_id = escalated(cli, workspace)
+
+    output = invoke(
+        cli, workspace, "retry", run_id, "build",
+        "--by", "ops", "--why", "coverage report is now produced", "--no-resume",
+    )
+
+    assert "re-entering" in output
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "build").status is NodeStatus.PENDING
+        recorded = [a for a in run.approvals if a.node_id == "build"]
+        assert recorded and "coverage report is now produced" in recorded[-1].note
+        assert recorded[-1].decided_by == "ops"
+
+
+def test_a_passing_node_cannot_be_re_entered(cli, workspace):
+    """Re-running work that already satisfied its gate, to see whether it does
+    so again, is how a green run gets manufactured."""
+    start(cli, workspace)
+    with store.Store().session() as session:
+        run_id = session.scalars(select(Run)).all()[-1].id
+
+    result = cli.invoke(app, ["retry", run_id, "design", "--by", "ops", "--why", "curiosity"])
+
+    assert result.exit_code == 1
+    assert "only a failed or errored node" in result.output

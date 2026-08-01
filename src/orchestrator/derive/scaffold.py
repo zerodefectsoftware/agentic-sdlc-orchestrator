@@ -11,6 +11,8 @@ implementation is judged by an acceptance suite this step must not pre-empt.
 
 from __future__ import annotations
 
+import textwrap
+
 from orchestrator.artifacts import Design
 from orchestrator.workers.pytask import Task, TaskOutput
 
@@ -20,6 +22,13 @@ HEADER = (
     '"""\n'
 )
 
+# Derived code is judged by the same lint gate as written code, so it has to
+# satisfy it. A module responsibility is prose an architect wrote to a length
+# nobody constrained — pasted onto one line it blew the line-length rule, and
+# the scaffold gate then failed deterministically, forever, on the generator's
+# own output rather than on anything an agent did.
+LINE_LENGTH = 96
+
 
 def scaffold_from_design(task: Task) -> TaskOutput:
     design = Design.model_validate_json(task.require("design.spec"))
@@ -28,7 +37,7 @@ def scaffold_from_design(task: Task) -> TaskOutput:
     files: dict[str, str] = {
         f"{root}/__init__.py": HEADER.format(
             title="The target package.",
-            body=f"Modules: {', '.join(m.name for m in design.modules) or '(none)'}",
+            body=_wrap(f"Modules: {', '.join(m.name for m in design.modules) or '(none)'}"),
         )
     }
 
@@ -42,8 +51,10 @@ def scaffold_from_design(task: Task) -> TaskOutput:
             }
         )
         files[f"{root}/{module.path}/__init__.py"] = HEADER.format(
-            title=f"{module.name} — {module.responsibility or 'no responsibility recorded'}",
-            body=f"Satisfies: {', '.join(satisfied) or 'see the design spec'}",
+            title=_wrap(
+                f"{module.name} — {module.responsibility or 'no responsibility recorded'}"
+            ),
+            body=_wrap(f"Satisfies: {', '.join(satisfied) or 'see the design spec'}"),
         )
 
     return TaskOutput(
@@ -54,6 +65,11 @@ def scaffold_from_design(task: Task) -> TaskOutput:
         artifacts={"scaffold.manifest": "\n".join(sorted(files)) + "\n"},
         files=files,
     )
+
+
+def _wrap(text: str) -> str:
+    """Fold prose to the line length the lint gate enforces."""
+    return "\n".join(textwrap.wrap(text, LINE_LENGTH)) or text
 
 
 def _package_root(task: Task) -> str:

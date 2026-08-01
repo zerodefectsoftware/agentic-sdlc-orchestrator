@@ -53,6 +53,7 @@ orchestrator approve <run> <node> --by you
 orchestrator evidence --write            # the reviewable bundle
 orchestrator metrics                     # success rate, retries, MTTR
 orchestrator why design.spec             # trace an artifact to what produced it
+orchestrator retry <run> <node> --by you --why "fixed the generator"
 orchestrator rollback <run>              # restore the baseline, then verify the restore
 ```
 

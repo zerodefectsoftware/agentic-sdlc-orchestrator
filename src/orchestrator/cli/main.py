@@ -503,6 +503,60 @@ def rollback(
 
 
 @app.command()
+def retry(
+    run_id: Annotated[str, typer.Argument()],
+    node_id: Annotated[str, typer.Argument()],
+    by: Annotated[str, typer.Option(help="Who is asking — recorded in the audit trail")],
+    why: Annotated[str, typer.Option(help="What changed since it failed")],
+    resume: Annotated[bool, typer.Option(help="Continue the run afterwards")] = True,
+) -> None:
+    """Re-enter a node that failed or errored, after fixing what broke it.
+
+    The verb the escalation checkpoint was missing. Approving an escalation
+    means *accept the state and move on*; rejecting means *stop*. Neither says
+    "the generator was wrong, I fixed it, run that node again" — which is what
+    an operator actually does most of the time, and doing it by hand in the
+    database is not an audit trail.
+
+    Only a node in a terminal failure can be re-entered. A passing node is not
+    retryable: re-running work that already satisfied its gate, to see whether
+    it satisfies it again, is how a green run gets manufactured.
+    """
+    with store.Store().session() as target_run:
+        run = _resolve(target_run, run_id)
+        execution = store.get_node(target_run, run, node_id)
+        if execution is None:
+            raise typer.BadParameter(f"run has no node '{node_id}'")
+
+        if execution.status not in (NodeStatus.FAILED, NodeStatus.ERRORED):
+            console.print(
+                f"[red]{node_id} is {execution.status}[/red] — only a failed or errored "
+                f"node can be re-entered"
+            )
+            raise typer.Exit(1)
+
+        # A retry is a human authorising work to be re-run, so it is recorded
+        # where every other human decision is — the approval trail the evidence
+        # bundle reads. Doing it by hand in the database would leave the run
+        # green with no record of who reopened it.
+        recorder.decide(
+            target_run,
+            recorder.request_approval(target_run, run, node_id=node_id, artifacts=[]),
+            decision=Decision.APPROVED,
+            decided_by=by,
+            note=f"re-entered after failure: {why}",
+        )
+        execution.status = NodeStatus.PENDING
+        run.status = RunStatus.RUNNING
+        run.stop_reason = None
+        target_run.flush()
+        console.print(f"[green]re-entering[/green] {node_id} — {why} [dim](by {by})[/dim]")
+
+    if resume:
+        _advance(run_id)
+
+
+@app.command()
 def resume(run_id: Annotated[str | None, typer.Argument()] = None) -> None:
     """Continue a run that stopped at a checkpoint."""
     _advance(run_id)
