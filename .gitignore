@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.db
+*.sqlite3
+.env
+.env.*
+!.env.example
+runs/
+
+# Assignment brief is Schwab Internal — keep local, never publish
+docs/*.pdf
