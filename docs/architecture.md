@@ -633,7 +633,7 @@ Adds:
 | `baseline-capture` node | Runs the existing suite and snapshots the tree **before anything writes**. Gate: `baseline_is_green` — a red baseline is a stop, not a caveat, because nothing downstream could then distinguish a regression from an inherited failure. Also supplies the rollback target (D21). |
 | `codebase-map` node | Parses the target with `ast` into files and symbols. Derived, not described — it is the ground truth the next node is checked against. |
 | `impact-analysis` node | §4.3 of the brief: impacted modules, contract diff, invalidated prior decisions, regression surface, risk. Gate: `every_referenced_symbol_exists` — every symbol it names is checked against the map. Fluent analysis of code that does not exist is the characteristic brownfield failure, and it reads as thorough right up until someone checks. |
-| Restricted fan-out | `impl` fans out over `impact-analysis.affected_modules`: in brownfield the blast radius is discovered, not declared. |
+| Restricted fan-out | `impl` fans out over `impact-analysis.affected_modules`: in brownfield the blast radius is discovered, not declared. This is also the scenario where fanning out is *safe* — the interfaces the modules call each other by already exist in the code being changed, which is why greenfield uses a single author instead (D23). |
 | Regression gate | Two populations, opposite requirements. New tests **red→green** (the RED gate means something sharper here: a test that does not reproduce the reported defect has not reproduced anything). Existing tests **green→green**, as a set difference against the baseline's failures — `pytest.exit_code == 0` cannot express this. |
 | Breaking-change escalation | `has_breaking_contract_change` on the analysis activates an optional human node. An agent deciding on its own that a break is acceptable is exactly the decision this system does not delegate (D13, D15's sibling). |
 | Approval widened | `design-approval` binds to the impact analysis as well as the design: approving a design without the blast radius it rests on is approving half the decision (D10). |
@@ -712,6 +712,7 @@ claimed.
 | **D20** | The target profile is the only place the target is named, and `{target.*}` resolves at load time | D3 says the orchestrator never imports the target; this is what keeps that survivable. Retargeting is a config change, and a resolved plan means `--dry-run` shows the command that will actually run | A plan is not fully readable without its profile |
 | **D21** | The baseline stores file **bodies**, not a reference to them | A rollback that can only name the state it wanted is a rollback in the documentation only. Content also means it works on a dirty tree and needs no VCS | Snapshot size grows with the target; fine at this scale, wrong for a large repo |
 | **D22** | A node declares `verify:` — checks the engine runs after the work, whose facts the gate then reads | The alternative is a gate expression naming a fact nothing produces (which ERRORs) or a node reporting on its own output (which D4 forbids). Also the only shape that works for fan-out children, where a per-module check cannot be a separate node | The plan carries commands as well as intent; a check is only as good as the tool behind it |
+| **D23** | Greenfield implementation is **one agent over the whole target**; brownfield keeps the per-module fan-out | In a new build the names modules call each other by are decided *while* the code is written, so parallel authors agree on them only by luck. A live run produced `links` importing three exception types from a module whose author had not run yet. Brownfield changes a codebase whose interfaces already exist, so its modules can be written in parallel without agreeing on anything new | No parallelism in greenfield implementation, and the blast radius widens from one directory to the target (D7 reduces to the target boundary there). The suite stays frozen either way, so D6 is unaffected |
 | **D2** | SQLite backs orchestration state, not just target data | Safe-stop resumability and reliability metrics need durable, queryable run state | Single-node only |
 | **D3** | `orchestrator` never imports `shortener`; target specifics in a config profile | Makes generality checkable rather than claimed | Some indirection |
 | **D4** | Exit gates evaluated by a non-producer, preferably a real tool | Agent self-reports are assertions, not evidence | Gates limited to machine-checkable properties |
@@ -941,26 +942,35 @@ nodes:
         - predicate: every_ac_has_a_test
 
   - id: impl
-    kind: fanout
+    kind: codeagent
     stage: implementation
+    role: implementer
     needs: [tests-acceptance]
-    from: design.artifacts.modules    # graph shape derived at runtime
-    template:
-      kind: codeagent
-      role: implementer
-      inputs: [design.artifacts.spec, intake.artifacts.register]
-      write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
-      verify:
-        - "sh:{target.commands.lint_path} {target.root}/{item.path}"
-      gate:                           # G6, per module. Scoped to this module on
-        all:                          # purpose: a whole-suite check here is
-          - "session.files_written > 0"   # an implementer that wrote nothing
-                                          # lints clean; seven of them did, and
-                                          # every gate reported green
-          - "ruff.exit_code == 0"     # unsatisfiable until the last child lands,
-                                      # so every earlier one would fail for work
-                                      # that was never its own. G7 is where the
-                                      # suite has to be green.
+    inputs: [design.artifacts.spec, intake.artifacts.register]
+    # One author for the whole target, not one per module. A greenfield build
+    # has no interfaces yet: the names modules call each other by are decided
+    # *while* the code is written, so parallel authors agree on them only by
+    # luck. A live run showed exactly that — `links` importing three exception
+    # names from a module whose author had not run.
+    #
+    # The cost is real and accepted: no parallelism in implementation, and the
+    # blast radius is the whole target rather than one directory (D7 is reduced
+    # to the target boundary here). Brownfield keeps the fan-out, where the
+    # interfaces already exist in the codebase being changed. See D23.
+    write_scope: ["{target.root}/**"]
+    freeze_paths: ["{target.tests_root}/**"]   # D6: not the suite judging it
+    params:
+      root: "{target.root}"
+      max_turns: 200          # seven modules is not a one-module job
+      timeout_s: 3600
+    verify:
+      - "sh:{target.commands.lint}"
+      - py:orchestrator.gates.imports_resolve
+    gate:                             # G6
+      all:
+        - "session.files_written > 0"
+        - "ruff.exit_code == 0"
+        - "imports.resolve == true"   # the modules have to import each other
 
   # ── Verify (parallel, then join) ────────────────────────────────────────
   - id: tests

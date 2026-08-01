@@ -340,8 +340,19 @@ def test_brownfield_does_not_scaffold_over_an_existing_codebase():
 
 
 def test_brownfield_fans_out_over_what_the_analysis_found():
+    """The fan-out lives where interfaces already exist.
+
+    Greenfield writes the whole target with one author, because in a new build
+    the names modules call each other by are decided while the code is written.
+    Brownfield is changing a codebase whose interfaces are already fixed, so its
+    modules can be written in parallel without agreeing on anything new (D23).
+    """
     plan = load_plan(PLANS / "brownfield.yaml", profile=PROFILE)
+    assert plan.node("impl").kind == "fanout"
     assert plan.node("impl").from_ == "impact-analysis.artifacts.affected_modules"
+
+    greenfield = load_plan(PLANS / "greenfield.yaml", profile=PROFILE)
+    assert greenfield.node("impl").kind == "codeagent"
 
 
 def test_brownfield_declares_a_rollback_the_engine_can_perform():

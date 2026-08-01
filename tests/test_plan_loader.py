@@ -111,7 +111,15 @@ def test_repair_loop_freezes_the_target_tests(plan):
 def test_implementer_and_test_author_are_different_roles(plan):
     """D5: the implementer must satisfy tests it did not write."""
     assert plan.node("tests-acceptance").role == "test-author"
-    assert plan.node("impl").template.role == "implementer"
+    assert plan.node("impl").role == "implementer"
+
+
+def test_the_implementer_cannot_touch_the_suite_judging_it(plan):
+    """D6, and it matters more now that one agent writes the whole target:
+    its write scope covers everything except the tests."""
+    impl = plan.node("impl")
+    assert impl.write_scope == ["target/shortener/**"]
+    assert impl.freeze_paths == ["target/tests/**"]
 
 
 def test_design_approval_is_bound_to_artifact_versions(plan):

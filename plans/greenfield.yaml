@@ -134,26 +134,35 @@ nodes:
         - predicate: every_ac_has_a_test
 
   - id: impl
-    kind: fanout
+    kind: codeagent
     stage: implementation
+    role: implementer
     needs: [tests-acceptance]
-    from: design.artifacts.modules    # graph shape derived at runtime
-    template:
-      kind: codeagent
-      role: implementer
-      inputs: [design.artifacts.spec, intake.artifacts.register]
-      write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
-      verify:
-        - "sh:{target.commands.lint_path} {target.root}/{item.path}"
-      gate:                           # G6, per module. Scoped to this module on
-        all:                          # purpose: a whole-suite check here is
-          - "session.files_written > 0"   # an implementer that wrote nothing
-                                          # lints clean; seven of them did, and
-                                          # every gate reported green
-          - "ruff.exit_code == 0"     # unsatisfiable until the last child lands,
-                                      # so every earlier one would fail for work
-                                      # that was never its own. G7 is where the
-                                      # suite has to be green.
+    inputs: [design.artifacts.spec, intake.artifacts.register]
+    # One author for the whole target, not one per module. A greenfield build
+    # has no interfaces yet: the names modules call each other by are decided
+    # *while* the code is written, so parallel authors agree on them only by
+    # luck. A live run showed exactly that — `links` importing three exception
+    # names from a module whose author had not run.
+    #
+    # The cost is real and accepted: no parallelism in implementation, and the
+    # blast radius is the whole target rather than one directory (D7 is reduced
+    # to the target boundary here). Brownfield keeps the fan-out, where the
+    # interfaces already exist in the codebase being changed. See D23.
+    write_scope: ["{target.root}/**"]
+    freeze_paths: ["{target.tests_root}/**"]   # D6: not the suite judging it
+    params:
+      root: "{target.root}"
+      max_turns: 200          # seven modules is not a one-module job
+      timeout_s: 3600
+    verify:
+      - "sh:{target.commands.lint}"
+      - py:orchestrator.gates.imports_resolve
+    gate:                             # G6
+      all:
+        - "session.files_written > 0"
+        - "ruff.exit_code == 0"
+        - "imports.resolve == true"   # the modules have to import each other
 
   # ── Verify (parallel, then join) ────────────────────────────────────────
   - id: tests

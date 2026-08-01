@@ -194,19 +194,26 @@ class CodeAgentWorker:
         guard = ScopeGuard(scope=scope, cwd=self.cwd)
         prompt = self._prompt_for(node)
 
+        # A node that writes one module and a node that writes a whole target
+        # are not the same size of job, and a turn ceiling tuned for the first
+        # aborts the second halfway through. The plan says which it is.
+        max_turns = int(node.params.get("max_turns", self.max_turns))
+        timeout_s = int(node.params.get("timeout_s", self.timeout_s))
+
         try:
             with warnings.catch_warnings(record=True) as raised:
                 warnings.simplefilter("always")
                 outcome = asyncio.run(
                     asyncio.wait_for(
-                        self._converse(node, prompt, inputs, guard), timeout=self.timeout_s
+                        self._converse(node, prompt, inputs, guard, max_turns),
+                        timeout=timeout_s,
                     )
                 )
             _refuse_if_guard_was_shadowed(node, raised)
         except TimeoutError as exc:
             raise WorkerError(
-                f"'{node.id}' exceeded {self.timeout_s}s. An unbounded agent loop has "
-                f"no MTTR; the turn budget was {self.max_turns}."
+                f"'{node.id}' exceeded {timeout_s}s. An unbounded agent loop has "
+                f"no MTTR; the turn budget was {max_turns}."
             ) from exc
         except WorkerError:
             raise
@@ -229,7 +236,12 @@ class CodeAgentWorker:
     # ------------------------------------------------------------------ #
 
     async def _converse(
-        self, node: Node, prompt: str, inputs: WorkInputs, guard: ScopeGuard
+        self,
+        node: Node,
+        prompt: str,
+        inputs: WorkInputs,
+        guard: ScopeGuard,
+        max_turns: int | None = None,
     ) -> dict[str, Any]:
         """Drive one scoped session to completion.
 
@@ -239,7 +251,7 @@ class CodeAgentWorker:
         the streaming form is not a preference here: a string prompt would mean
         an unscoped agent, which is the one thing this worker will not run.
         """
-        query, options = self._sdk(node, prompt, guard)
+        query, options = self._sdk(node, prompt, guard, max_turns)
 
         finished = asyncio.Event()
         outcome: dict[str, Any] = {"terminal_reason": None, "subtype": None, "turns": 0}
@@ -267,7 +279,7 @@ class CodeAgentWorker:
         finished.set()  # a session that yielded no result must not hang the stream
         return outcome
 
-    def _sdk(self, node: Node, prompt: str, guard: ScopeGuard):
+    def _sdk(self, node: Node, prompt: str, guard: ScopeGuard, max_turns: int | None = None):
         """Build the SDK call, or use the injected one.
 
         Imported lazily so the package is only required for live runs.
@@ -293,11 +305,13 @@ class CodeAgentWorker:
             return PermissionResultDeny(message=reason, interrupt=False)
 
         options = ClaudeAgentOptions(
-            **self._option_values(node, prompt), can_use_tool=can_use_tool
+            **self._option_values(node, prompt, max_turns), can_use_tool=can_use_tool
         )
         return query, options
 
-    def _option_values(self, node: Node, prompt: str) -> dict[str, Any]:
+    def _option_values(
+        self, node: Node, prompt: str, max_turns: int | None = None
+    ) -> dict[str, Any]:
         """Every SDK option except the callback, which cannot be previewed.
 
         Shared with `describe` so a dry run reports the configuration a live run
@@ -315,7 +329,7 @@ class CodeAgentWorker:
             # unlisted so every one of them falls through to `can_use_tool`.
             "allowed_tools": list(READ_TOOLS),
             "disallowed_tools": list(FORBIDDEN_TOOLS),
-            "max_turns": self.max_turns,
+            "max_turns": max_turns or int(node.params.get("max_turns", self.max_turns)),
         }
         if node.effort:
             values["effort"] = str(node.effort)
