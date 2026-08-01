@@ -12,6 +12,30 @@ assembly reads those artifacts back.
 Separate from `lineage/` because the direction differs: lineage is the write
 path during execution and stays close to a leaf, while assembly reads across
 four stores. Folding it into lineage would invert that dependency.
-
-Modules: `bundle` (the model), `assemble` (collection), `render` (output).
 """
+
+from orchestrator.evidence.assemble import assemble
+from orchestrator.evidence.bundle import (
+    ApprovalRecord,
+    ArtifactRecord,
+    AttemptRecord,
+    CheckRecord,
+    EvidenceBundle,
+    GateOutcome,
+    NodeRecord,
+)
+from orchestrator.evidence.render import render_json, render_markdown, write
+
+__all__ = [
+    "ApprovalRecord",
+    "ArtifactRecord",
+    "AttemptRecord",
+    "CheckRecord",
+    "EvidenceBundle",
+    "GateOutcome",
+    "NodeRecord",
+    "assemble",
+    "render_json",
+    "render_markdown",
+    "write",
+]
