@@ -144,7 +144,7 @@ override:
       role: implementer
       write_scope: ["{target.root}/{item.path}/**"]
       verify:
-        - "sh:{target.commands.lint}"
+        - "sh:{target.commands.lint_path} {target.root}/{item.path}"
       gate:                             # G6, per module
         all:
           - "ruff.exit_code == 0"

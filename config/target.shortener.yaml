@@ -16,6 +16,9 @@ target:
     test: .venv/bin/pytest target/tests
     test_cov: .venv/bin/pytest target/tests --cov=target/shortener --cov-report=json
     lint: .venv/bin/ruff check target/
+    # Same tool, applied to one path — a fan-out child must be judged on its own
+    # module, not on whichever sibling happens to be half-written beside it.
+    lint_path: .venv/bin/ruff check
     format: .venv/bin/ruff format target/
     serve: .venv/bin/uvicorn shortener.main:app
 

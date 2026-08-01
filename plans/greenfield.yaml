@@ -138,12 +138,13 @@ nodes:
       role: implementer
       write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
       verify:
-        - "sh:{target.commands.lint}"
-        - "sh:{target.commands.test}"
-      gate:                           # G6, per module
-        all:
-          - "ruff.exit_code == 0"
-          - "pytest.exit_code == 0"
+        - "sh:{target.commands.lint_path} {target.root}/{item.path}"
+      gate:                           # G6, per module. Scoped to this module on
+        all:                          # purpose: a whole-suite check here is
+          - "ruff.exit_code == 0"     # unsatisfiable until the last child lands,
+                                      # so every earlier one would fail for work
+                                      # that was never its own. G7 is where the
+                                      # suite has to be green.
 
   # ── Verify (parallel, then join) ────────────────────────────────────────
   - id: tests
