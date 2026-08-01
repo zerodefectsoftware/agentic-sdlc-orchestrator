@@ -133,14 +133,26 @@ def _refuse_if_guard_was_shadowed(node: Node, raised: list) -> None:
         )
 
 
-async def _streamed(text: str):
-    """The one-message streaming form the permission callback requires."""
+async def _streamed(text: str, until: asyncio.Event):
+    """The prompt, as a stream that stays open until the session ends.
+
+    Two things ride this channel: the prompt, and the control protocol that
+    carries `can_use_tool` round-trips. A generator that yields once and returns
+    closes it immediately, so every permission request afterwards fails with
+    `AbortError: Stream closed` — the agent cannot write, the guard records
+    nothing, and the node passes a lint gate on an empty module.
+
+    That is exactly what happened to seven implementers: all green, nothing
+    written. Holding the stream open until the result arrives is what makes the
+    permission callback usable at all.
+    """
     yield {
         "type": "user",
         "message": {"role": "user", "content": text},
         "parent_tool_use_id": None,
         "session_id": "default",
     }
+    await until.wait()
 
 
 class CodeAgentWorker:
@@ -203,7 +215,10 @@ class CodeAgentWorker:
 
         return WorkerResult(
             facts=self._facts(node, guard, outcome),
-            artifacts=(self._changeset(node, guard), *self._declared(node)),
+            artifacts=(
+                self._changeset(node, guard, str(outcome.get("report", ""))),
+                *self._declared(node),
+            ),
             consumed=tuple(sorted(inputs)),
             model=node.model,
             prompt_ref=str(self._prompt_path(node)),
@@ -226,19 +241,31 @@ class CodeAgentWorker:
         """
         query, options = self._sdk(node, prompt, guard)
 
-        terminal_reason = None
-        subtype = None
-        turns = 0
+        finished = asyncio.Event()
+        outcome: dict[str, Any] = {"terminal_reason": None, "subtype": None, "turns": 0}
 
-        async for message in query(prompt=_streamed(render_inputs(inputs)), options=options):
-            turns += 1
+        async for message in query(
+            prompt=_streamed(render_inputs(inputs), finished), options=options
+        ):
+            outcome["turns"] += 1
             # Identified by shape rather than by imported type: this module must
             # not require the SDK to be installed in order to be tested.
             if hasattr(message, "terminal_reason"):
-                terminal_reason = message.terminal_reason
-                subtype = getattr(message, "subtype", None)
+                outcome |= {
+                    "terminal_reason": message.terminal_reason,
+                    "subtype": getattr(message, "subtype", None),
+                    "is_error": bool(getattr(message, "is_error", False)),
+                    "errors": str(getattr(message, "errors", "") or ""),
+                    # What the agent said last. The session that found the bug
+                    # above reported it precisely in this field, and the worker
+                    # threw it away — so a run knew nothing about a failure its
+                    # own agent had diagnosed.
+                    "report": str(getattr(message, "result", "") or "")[:4000],
+                }
+                finished.set()
 
-        return {"terminal_reason": terminal_reason, "subtype": subtype, "turns": turns}
+        finished.set()  # a session that yielded no result must not hang the stream
+        return outcome
 
     def _sdk(self, node: Node, prompt: str, guard: ScopeGuard):
         """Build the SDK call, or use the injected one.
@@ -342,14 +369,21 @@ class CodeAgentWorker:
         what the harness watched happen.
         """
         return {
-            f"{node.id}.session_ended": Fact(
+            # Namespaced by what produced them, like every other worker's facts.
+            # Naming them after the node made them unaddressable from a fan-out
+            # template, where the gate is written once and the node ids are
+            # discovered at runtime.
+            "session.ended": Fact(
                 outcome.get("terminal_reason") or "unknown", FactSource.TOOL, "claude-agent-sdk"
             ),
-            f"{node.id}.turns": Fact(outcome.get("turns", 0), FactSource.TOOL, "claude-agent-sdk"),
-            f"{node.id}.files_written": Fact(
+            "session.turns": Fact(outcome.get("turns", 0), FactSource.TOOL, "claude-agent-sdk"),
+            "session.errored": Fact(
+                bool(outcome.get("is_error")), FactSource.TOOL, "claude-agent-sdk"
+            ),
+            "session.files_written": Fact(
                 len(set(guard.written)), FactSource.VALIDATOR, "scope-guard"
             ),
-            f"{node.id}.scope_denials": Fact(
+            "session.denials": Fact(
                 len(guard.denied), FactSource.VALIDATOR, "scope-guard"
             ),
         }
@@ -378,13 +412,15 @@ class CodeAgentWorker:
             produced.append(ProducedArtifact(f"{node.id}.{output}", path.read_text()))
         return tuple(produced)
 
-    def _changeset(self, node: Node, guard: ScopeGuard) -> ProducedArtifact:
-        """A manifest of what this node changed, and what it was stopped from changing."""
+    def _changeset(self, node: Node, guard: ScopeGuard, report: str = "") -> ProducedArtifact:
+        """A manifest of what this node changed, what it was stopped from
+        changing, and what it said about the attempt."""
         body = {
             "written": sorted(set(guard.written)),
             "denied": sorted(set(guard.denied)),
             "write_scope": list(guard.scope.allowed),
             "frozen": list(guard.scope.frozen),
+            "report": report,
         }
         return ProducedArtifact(
             f"{node.id}.changeset", json.dumps(body, indent=2, sort_keys=True)

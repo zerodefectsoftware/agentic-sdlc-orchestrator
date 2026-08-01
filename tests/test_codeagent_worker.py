@@ -177,7 +177,7 @@ def test_attempts_to_escape_the_scope_survive_into_the_evidence(prompts):
 
     changeset = json.loads(result.artifact("impl:api.changeset").content)
     assert changeset["denied"] == ["target/shortener/storage/db.py"]
-    assert result.facts["impl:api.scope_denials"].value == 1
+    assert result.facts["session.denials"].value == 1
 
 
 def test_the_facts_describe_the_session_not_the_quality_of_the_work(prompts):
@@ -186,10 +186,10 @@ def test_the_facts_describe_the_session_not_the_quality_of_the_work(prompts):
         node(), {}, scope()
     )
 
-    assert result.facts["impl:api.session_ended"].value == "stop"
-    assert result.facts["impl:api.files_written"].value == 1
+    assert result.facts["session.ended"].value == "stop"
+    assert result.facts["session.files_written"].value == 1
     assert all(fact.source is not FactSource.AGENT for fact in result.facts.values())
-    assert result.facts["impl:api.scope_denials"].source is FactSource.VALIDATOR
+    assert result.facts["session.denials"].source is FactSource.VALIDATOR
 
 
 def test_the_prompt_reference_is_recorded_for_lineage(prompts):
@@ -382,4 +382,4 @@ def test_a_shadowed_read_tool_does_not_discard_the_session(prompts):
         return query, {}
 
     result = worker(build, prompts).run(node(), {}, scope())
-    assert result.facts["impl:api.session_ended"].value == "stop"
+    assert result.facts["session.ended"].value == "stop"

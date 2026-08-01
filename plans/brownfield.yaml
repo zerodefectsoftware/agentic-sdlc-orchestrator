@@ -131,6 +131,7 @@ override:
       - "sh:{target.commands.test}"     # a code agent cannot report its own red
     gate:                               # G5 — the RED gate
       all:
+        - "session.files_written > 0"
         - "pytest.exit_code != 0"
         - predicate: every_ac_has_a_test
 
@@ -151,6 +152,7 @@ override:
         - "sh:{target.commands.lint_path} {target.root}/{item.path}"
       gate:                             # G6, per module
         all:
+          - "session.files_written > 0"
           - "ruff.exit_code == 0"
 
   # The brownfield verification gate. `pytest.exit_code == 0` cannot express

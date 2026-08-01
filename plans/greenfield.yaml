@@ -129,6 +129,7 @@ nodes:
       - "sh:{target.commands.test}"   # a code agent cannot report its own red
     gate:                             # G5 — the RED gate
       all:
+        - "session.files_written > 0"
         - "pytest.exit_code != 0"     # must FAIL against the scaffold
         - predicate: every_ac_has_a_test
 
@@ -146,6 +147,9 @@ nodes:
         - "sh:{target.commands.lint_path} {target.root}/{item.path}"
       gate:                           # G6, per module. Scoped to this module on
         all:                          # purpose: a whole-suite check here is
+          - "session.files_written > 0"   # an implementer that wrote nothing
+                                          # lints clean; seven of them did, and
+                                          # every gate reported green
           - "ruff.exit_code == 0"     # unsatisfiable until the last child lands,
                                       # so every earlier one would fail for work
                                       # that was never its own. G7 is where the
@@ -186,6 +190,7 @@ nodes:
     write_scope: ["target/README.md", "target/docs/**"]
     gate:                             # G8 — executable documentation
       all:
+        - "session.files_written > 0"
         - predicate: setup_steps_execute_in_clean_venv
         - predicate: documented_endpoints_match_openapi
 
