@@ -1,0 +1,172 @@
+{
+  "tests": [
+    {
+      "id": "test_r1_create.py::test_valid_url_returns_201_with_short_url_code_and_long_url",
+      "covers": ["AC1.1"]
+    },
+    {
+      "id": "test_r1_create.py::test_both_http_and_https_are_accepted",
+      "covers": ["AC1.1"]
+    },
+    {
+      "id": "test_r1_create.py::test_created_link_echoes_optional_expiry",
+      "covers": ["AC1.1"]
+    },
+    {
+      "id": "test_r1_create.py::test_created_link_is_immediately_resolvable",
+      "covers": ["AC1.1"]
+    },
+    {
+      "id": "test_r1_create.py::test_invalid_urls_are_rejected_with_400_and_error_code",
+      "covers": ["AC1.2"]
+    },
+    {
+      "id": "test_r1_create.py::test_rejected_creation_does_not_create_a_link",
+      "covers": ["AC1.2"]
+    },
+    {
+      "id": "test_r1_create.py::test_two_urls_get_distinct_codes_each_resolving_to_its_own",
+      "covers": ["AC1.3"]
+    },
+    {
+      "id": "test_r1_create.py::test_same_url_twice_gets_distinct_codes",
+      "covers": ["AC1.3"]
+    },
+    {
+      "id": "test_r1_create.py::test_code_matches_documented_charset_and_length",
+      "covers": ["AC1.4"]
+    },
+    {
+      "id": "test_r1_create.py::test_generated_codes_are_unique_across_many_creations",
+      "covers": ["AC1.4"]
+    },
+    {
+      "id": "test_r2_redirect.py::test_redirect_location_is_byte_identical_to_stored_url",
+      "covers": ["AC2.1"]
+    },
+    {
+      "id": "test_r2_redirect.py::test_redirect_uses_301_permanent",
+      "covers": ["AC2.1"]
+    },
+    {
+      "id": "test_r2_redirect.py::test_expired_code_returns_410",
+      "covers": ["AC2.1"]
+    },
+    {
+      "id": "test_r2_redirect.py::test_unknown_code_returns_404",
+      "covers": ["AC2.2"]
+    },
+    {
+      "id": "test_r2_redirect.py::test_unknown_code_records_no_analytics_event",
+      "covers": ["AC2.2"]
+    },
+    {
+      "id": "test_r2_redirect.py::test_redirect_p95_latency_under_budget",
+      "covers": ["AC2.3"]
+    },
+    {
+      "id": "test_r3_manage.py::test_metadata_returns_long_url_created_at_and_click_count",
+      "covers": ["AC3.1"]
+    },
+    {
+      "id": "test_r3_manage.py::test_metadata_click_count_reflects_recorded_clicks",
+      "covers": ["AC3.1"]
+    },
+    {
+      "id": "test_r3_manage.py::test_delete_returns_204_and_code_no_longer_redirects",
+      "covers": ["AC3.2"]
+    },
+    {
+      "id": "test_r3_manage.py::test_deleted_link_stops_serving_but_keeps_its_history",
+      "covers": ["AC3.2"]
+    },
+    {
+      "id": "test_r3_manage.py::test_unknown_code_metadata_returns_404",
+      "covers": ["AC3.3"]
+    },
+    {
+      "id": "test_r3_manage.py::test_unknown_code_delete_returns_404",
+      "covers": ["AC3.3"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_total_click_count_equals_number_of_redirects",
+      "covers": ["AC4.1"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_total_click_count_is_zero_for_a_link_with_no_clicks",
+      "covers": ["AC4.1"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_click_counts_are_scoped_to_their_own_link",
+      "covers": ["AC4.1"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_time_series_counts_cover_only_the_window_and_sum_to_its_clicks",
+      "covers": ["AC4.2"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_time_series_window_excluding_clicks_sums_to_zero",
+      "covers": ["AC4.2"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_time_series_requires_an_explicit_window",
+      "covers": ["AC4.2"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_time_series_rejects_more_intervals_than_the_documented_cap",
+      "covers": ["AC4.2"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_breakdown_by_referrer_groups_clicks",
+      "covers": ["AC4.3"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_breakdown_by_device_and_browser_class",
+      "covers": ["AC4.3"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_click_is_visible_within_freshness_bound",
+      "covers": ["AC4.4"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_analytics_for_unknown_code_returns_404_and_no_data",
+      "covers": ["AC4.5"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_created_link_survives_process_restart",
+      "covers": ["AC5.1"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_redirect_succeeds_when_analytics_recording_fails",
+      "covers": ["AC5.2", "AC2.3"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_analytics_failure_is_logged",
+      "covers": ["AC5.2"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_health_returns_200_while_dependencies_are_reachable",
+      "covers": ["AC5.3"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_health_stays_200_when_only_analytics_is_degraded",
+      "covers": ["AC5.3"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_health_returns_non_2xx_when_the_datastore_is_unreachable",
+      "covers": ["AC5.3"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_client_exceeding_rate_limit_gets_429_with_retry_after",
+      "covers": ["AC5.4"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_rate_limited_client_does_not_affect_other_clients",
+      "covers": ["AC5.4"]
+    },
+    {
+      "id": "test_r5_reliability.py::test_sustained_redirect_load_meets_availability_target",
+      "covers": ["AC5.5"]
+    }
+  ]
+}

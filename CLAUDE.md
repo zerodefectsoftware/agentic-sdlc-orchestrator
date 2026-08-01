@@ -4,28 +4,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Engine built and tested; no live run has happened yet. `plans/` holds all three
-scenarios — `greenfield.yaml` is the spine, `brownfield.yaml` and `ambiguous.yaml` are
-deltas over it (`extends` / `insert_after` / `override` / `remove`, see D19). All three
-pass `orchestrator preflight` and `orchestrator run --dry-run`.
+**A live greenfield run is parked mid-flight — resume it, do not start a new one.**
+Run `610c782beb9a4ea6bc7c8d06444eb432`, status BLOCKED, in `runs/`. Everything through
+`tests-acceptance` is green and cost real model calls; only implementation is outstanding:
 
-Every gate check now has a producer. Nodes declare `verify:` entries the engine runs after
-the work (D22) — that is where `ruff.exit_code`, `pytest.exit_code`, `imports.resolve`, and
-`coverage.percent` come from. `openapi.valid` became the `contract_is_valid` predicate: the
-contract lives only in the design artifact, and its author cannot vouch for it.
+| Node | State | Artifact worth reading |
+| --- | --- | --- |
+| intake → normalize-clarification | passed | `intake.register` v1 → v3 (analyst → policy → human answers) |
+| design | passed | `design.spec@v2` — v1 was **rejected**, reasons in the approval trail |
+| tests-acceptance | passed | 38 tests, 20 criteria, RED gate held |
+| scaffold, impl | **pending** | re-run these |
+| tests, docs, security, release-readiness, accept | pending | |
 
-No live model call has ever been made. Both SDKs are now installed (`anthropic` 0.120.2,
-`claude-agent-sdk` 0.2.128) and their call shapes verified against the worker code, but a
-live run needs `ANTHROPIC_API_KEY` — which only the user can supply.
+To continue: `.venv/bin/orchestrator resume 610c782beb9a4ea6bc7c8d06444eb432`. Needs
+`ANTHROPIC_API_KEY` in `.env` (already present) and `ORCHESTRATOR_WORKER=live`. Expect one
+long implementer session — the whole target, up to 200 turns and an hour.
 
-`target/` is **empty except `target/tests/conftest.py`**, which is the ten-line `sys.path`
-shim that makes the target importable to pytest — harness, not deliverable. Nothing else
-under `target/` predates a run, which is what makes the falsifiability argument in
-`README.md` true. Do not hand-write anything there.
+`target/` is back to `target/tests/` (conftest + the agent-written suite) with no
+`shortener/` package: the previous wave's module code had no lineage behind it (a scheduler
+bug, since fixed) and was deleted. `scaffold` recreates the packages.
 
-`docs/architecture.md` is the design; `docs/repo-layout.md` says where things live.
+The `impl:*` fan-out children and their escalation are SKIPPED — they belong to a plan shape
+that no longer exists (D23: greenfield uses a single implementer, brownfield keeps the
+fan-out).
 
-Per the user's global rules, Claude commits only — the user handles push, remote setup, and destructive ops.
+`docs/observing-a-run.md` says where every node's output lands and what to read at each step.
+
+**Known gaps, in the order they will bite:**
+
+- The scope guard has never been observed *refusing* a write in a live run. Every write so
+  far has been in scope, so D7's enforcement is demonstrated only by construction.
+- A code-agent session records nothing until it ends, and mid-wave state is invisible while
+  a wave is open. Fine for a demo, wrong for audit-grade observability.
+- Nothing has run past `impl`: `tests`, `docs`, `security`, release readiness and the
+  evidence bundle are all unexercised live.
+- Brownfield and ambiguous have never been run at all.
 
 ## Commands
 
