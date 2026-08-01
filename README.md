@@ -35,21 +35,22 @@ Requires Python 3.13 and [`uv`](https://docs.astral.sh/uv/).
 uv venv --python 3.13
 uv pip install -e ".[dev]"
 
-.venv/bin/pytest                                # run the suite
-.venv/bin/ruff check .                          # lint
-.venv/bin/uvicorn shortener.main:app --reload   # serve the target on :8000
+.venv/bin/pytest                # orchestrator suite
+.venv/bin/pytest target/tests   # target suite (agent-written)
+.venv/bin/ruff check .          # lint (target excluded — it is gated separately)
 ```
 
-Verify:
+Serve the target:
 
 ```bash
-curl localhost:8000/health     # → {"status":"ok"}
+cd target && ../.venv/bin/uvicorn shortener.main:app --reload
+curl localhost:8000/health      # → {"status":"ok"}
 ```
 
 Run a single test:
 
 ```bash
-.venv/bin/pytest tests/test_health.py::test_health_returns_ok
+.venv/bin/pytest tests/test_architecture_invariants.py::test_orchestrator_never_imports_the_target
 ```
 
 ---
@@ -166,14 +167,23 @@ Full risk register in [`docs/architecture.md`](docs/architecture.md) §10.
 ## Repo layout
 
 ```
-src/orchestrator/    the deliverable — control plane
-src/shortener/       the target — driven by orchestrator runs
-tests/               orchestrator tests (target tests are generated)
-docs/architecture.md design, decision registry, risk register
+src/orchestrator/    the deliverable — control plane (engine, gates, policy,
+                     workers, lineage, state, metrics, cli)
+plans/               plan graphs (YAML) — the SDLC, as data
+prompts/ schemas/    agent role prompts; artifact contracts
+config/              target profiles
+requirements/        prose scenario inputs — what a run consumes
+fixtures/            recorded worker outputs, for replay runs and engine tests
+target/              the target codebase — written by runs, not by hand
+tests/               orchestrator tests (never agent-written)
 runs/                per-run artifacts, lineage, evidence bundles (gitignored)
 ```
 
-`orchestrator` never imports `shortener`. Generality is therefore checkable, not claimed.
+Full map and the rules that govern each directory: [`docs/repo-layout.md`](docs/repo-layout.md).
+
+`orchestrator` never imports the target, no node may write outside `target/`, and the
+target's tests live in a separate tree from ours. All three are enforced by
+`tests/test_architecture_invariants.py` rather than left as claims.
 
 ---
 

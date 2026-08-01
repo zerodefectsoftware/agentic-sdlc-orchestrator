@@ -1,0 +1,29 @@
+# Target profile — everything the orchestrator knows about a specific codebase.
+#
+# Swapping this file (and the paths in it) points the orchestrator at a
+# different target. Nothing in src/orchestrator/ references the shortener
+# directly (D3), so retargeting is a config change rather than a code change.
+
+target:
+  name: shortener
+  root: target/shortener
+  tests_root: target/tests
+  language: python
+
+  # Gate evaluators. These are the commands the `tool` node kind runs; their
+  # exit codes and parsed output feed gate expressions (e.g. pytest.exit_code).
+  commands:
+    test: .venv/bin/pytest target/tests
+    test_cov: .venv/bin/pytest target/tests --cov=target/shortener --cov-report=json
+    lint: .venv/bin/ruff check target/
+    format: .venv/bin/ruff format target/
+    serve: .venv/bin/uvicorn shortener.main:app
+
+  # Ceiling on every node's write_scope. No node may write outside this,
+  # regardless of what its plan entry asks for — a misbehaving agent cannot
+  # reach the orchestrator that governs it.
+  write_ceiling:
+    - "target/**"
+
+  thresholds:
+    coverage_min: 80

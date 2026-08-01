@@ -4,9 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Toolchain skeleton only. `src/shortener` has a health endpoint; `src/orchestrator` is an
-empty package. No shortener features and no orchestration engine exist yet — the brief at
-`docs/Assignment Agentic-Proficient Software Engineer.pdf` is still the only spec.
+Design complete, engine not built. `src/orchestrator/` is a package skeleton;
+`plans/greenfield.yaml` is a real plan graph with no engine to execute it yet.
+
+`target/shortener/` holds a hand-written health endpoint from the toolchain check. **That is
+a temporary exception to the rule that the target is written by runs** — reset the target
+directory before the greenfield demo, or the falsifiability argument in `README.md` is
+false.
+
+`docs/architecture.md` is the design; `docs/repo-layout.md` says where things live.
 
 Git is initialized on `main` with no commits yet. Per the user's global rules, Claude
 commits only — the user handles push, remote setup, and destructive ops.
@@ -20,22 +26,25 @@ needing an activated shell.
 uv venv --python 3.13          # create the venv (once)
 uv pip install -e ".[dev]"     # install project + dev extras, editable
 
-.venv/bin/pytest                                  # full suite
-.venv/bin/pytest tests/test_health.py             # one file
-.venv/bin/pytest tests/test_health.py::test_health_returns_ok   # one test
-.venv/bin/pytest -k health                        # by name pattern
+.venv/bin/pytest                                  # orchestrator suite
+.venv/bin/pytest target/tests                     # target suite (agent-written)
+.venv/bin/pytest tests/test_architecture_invariants.py          # one file
+.venv/bin/pytest tests/test_architecture_invariants.py::test_orchestrator_never_imports_the_target
+.venv/bin/pytest -k invariant                     # by name pattern
 .venv/bin/pytest --cov=src --cov-report=term-missing
 
-.venv/bin/ruff check .         # lint
+.venv/bin/ruff check .         # lint (target/ excluded — gated separately)
 .venv/bin/ruff check --fix .   # lint + autofix
 .venv/bin/ruff format .        # format
 
-.venv/bin/uvicorn shortener.main:app --reload     # dev server on :8000
+cd target && ../.venv/bin/uvicorn shortener.main:app --reload    # target on :8000
 ```
 
-The editable install is what puts `shortener` and `orchestrator` on the path — tests import
-`from shortener.main import app`, not via relative paths. A `ModuleNotFoundError` in pytest
-almost always means the editable install is stale; re-run `uv pip install -e ".[dev]"`.
+`testpaths = ["tests"]` means a bare `pytest` runs **only our suite**; the target's tests are
+run explicitly, because they are agent-written and gated rather than owned. The editable
+install covers `orchestrator` only — the target is not packaged (D3), and puts itself on the
+path via `target/tests/conftest.py`. A `ModuleNotFoundError` for `orchestrator` means the
+editable install is stale; re-run `uv pip install -e ".[dev]"`.
 
 ## Stack and why
 

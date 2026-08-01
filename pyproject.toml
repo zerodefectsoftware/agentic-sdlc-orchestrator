@@ -26,9 +26,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/orchestrator", "src/shortener"]
+# The target is deliberately not packaged — it is an arbitrary codebase the
+# orchestrator operates on, not part of the deliverable (D3).
+packages = ["src/orchestrator"]
 
 [tool.pytest.ini_options]
+# Our suite only. The target's tests are agent-written and run separately,
+# via the command in config/target.shortener.yaml.
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q --strict-markers"
@@ -36,6 +40,9 @@ addopts = "-q --strict-markers"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+# Target code is linted by the gate, using the target profile's command —
+# not by our own lint run, whose failures would be our problem to fix.
+extend-exclude = ["target"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
