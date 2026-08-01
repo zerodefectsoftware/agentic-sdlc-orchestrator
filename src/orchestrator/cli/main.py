@@ -235,6 +235,15 @@ def _release_escalation(session, run, execution) -> None:
     if source is None:
         return
 
+    if source.status not in (NodeStatus.FAILED, NodeStatus.ERRORED):
+        # The checkpoint outlived the problem: the node was retried and has
+        # since passed. Releasing it now would demote work that is already
+        # green — a stale approval must not be able to undo a real result.
+        console.print(
+            f"  [dim]nothing to release[/dim] — {escalated} is {source.status}"
+        )
+        return
+
     if params.get("escalated_for") == "error":
         source.status = NodeStatus.PENDING
         console.print(f"  [dim]re-entering[/dim] {escalated} — the check can now be performed")

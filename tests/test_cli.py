@@ -508,3 +508,27 @@ def test_a_passing_node_cannot_be_re_entered(cli, workspace):
 
     assert result.exit_code == 1
     assert "only a failed or errored node" in result.output
+
+
+def test_releasing_a_stale_escalation_cannot_demote_a_passed_node(cli, workspace):
+    """A checkpoint can outlive the problem it was raised for.
+
+    `build` errored, the operator fixed the harness and retried it green, and
+    the original escalation was still sitting there pending. Approving it must
+    not put a passed node back into the graph as skipped.
+    """
+    run_id = escalated(cli, workspace)
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        stale = next(
+            n.node_id for n in store.all_nodes(session, run) if n.node_id.startswith("escalate:")
+        )
+        store.get_node(session, run, "build").status = NodeStatus.PASSED
+        session.flush()
+
+    output = invoke(cli, workspace, "approve", run_id, stale, "--by", "ops", "--no-resume")
+
+    assert "nothing to release" in output
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "build").status is NodeStatus.PASSED
