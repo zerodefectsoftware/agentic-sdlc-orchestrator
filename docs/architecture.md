@@ -305,7 +305,8 @@ engine's surface stays small enough to reason about precisely because the intere
 variation lives outside it.
 
 It also makes the system legible: a reviewer can read the SDLC directly out of one file,
-rather than inferring it from control flow.
+rather than inferring it from control flow. **Appendix A** is the complete greenfield plan,
+followed by the entire brownfield delta.
 
 ### 4.8 The Worker interface (D18)
 
@@ -657,3 +658,219 @@ claimed.
 Every §4.4 capability is ours. Dependencies supply mechanism — graph maths, storage,
 concurrency, a permission primitive — never the governed behaviour itself. That is the
 build/buy line (§2.1) applied to the graded requirements one by one.
+
+---
+
+## Appendix A — Worked plan graph
+
+The engine is fixed; this file is the SDLC. `plans/greenfield.yaml`:
+
+```yaml
+plan: greenfield
+version: 1
+description: Requirement → reviewable change set, from an empty target.
+
+defaults:
+  model: claude-opus-5
+  effort: high
+  retry_budget: 2
+  autonomy: AUTO
+
+nodes:
+
+  # ── Understand ──────────────────────────────────────────────────────────
+  - id: intake
+    kind: agent
+    role: analyst
+    output_schema: schemas/requirement_register.json
+    effort: medium                    # structured extraction; depth adds little
+    gate:                             # G1
+      all:
+        - predicate: schema_valid
+        - predicate: every_requirement_has_testable_ac
+
+  - id: ambiguity-triage
+    kind: tool                        # policy evaluation, not a judgment call
+    needs: [intake]
+    run: orchestrator.policy.triage_ambiguities
+    escalate_when: "any(ambiguities, severity >= HIGH)"
+    on_escalate: clarify-with-human
+    gate:                             # G2
+      all:
+        - predicate: no_ambiguity_without_disposition
+
+  - id: clarify-with-human
+    kind: human
+    optional: true                    # only instantiated when triage escalates
+    autonomy: APPROVE
+    presents: [intake.artifacts.ambiguities]
+
+  # ── Design ──────────────────────────────────────────────────────────────
+  - id: design
+    kind: agent
+    role: architect
+    needs: [ambiguity-triage]
+    outputs: [openapi, data_model, modules, decisions]
+    gate:                             # G3
+      all:
+        - "openapi.valid == true"
+        - predicate: requirement_design_matrix_complete   # both directions
+        - predicate: no_unmapped_design_elements          # catches gold-plating
+
+  - id: design-approval
+    kind: human
+    needs: [design]
+    autonomy: APPROVE
+    binds_to: [design.artifacts.openapi, design.artifacts.decisions]
+    # binds_to implements D10: if either artifact is re-derived, this
+    # approval reverts to pending and G10 blocks.
+
+  # ── Build ───────────────────────────────────────────────────────────────
+  - id: scaffold
+    kind: derive                      # deterministic: models from the contract
+    needs: [design-approval]
+    from: design.artifacts.openapi
+    write_scope: ["src/shortener/**"]
+    gate:                             # G4
+      all:
+        - "imports.resolve == true"
+        - "ruff.exit_code == 0"
+
+  - id: tests-acceptance
+    kind: codeagent
+    role: test-author                 # deliberately NOT the implementer (D5)
+    needs: [scaffold]
+    inputs: [intake.artifacts.acceptance_criteria]
+    write_scope: ["tests/**"]
+    gate:                             # G5 — the RED gate
+      all:
+        - "pytest.exit_code != 0"     # must FAIL against the scaffold
+        - predicate: every_ac_has_a_test
+
+  - id: impl
+    kind: fanout
+    needs: [tests-acceptance]
+    from: design.artifacts.modules    # graph shape derived at runtime
+    template:
+      kind: codeagent
+      role: implementer
+      write_scope: ["src/shortener/{item.path}/**"]   # D7 blast radius
+      gate:                           # G6, per module
+        all:
+          - "ruff.exit_code == 0"
+          - "pytest.exit_code == 0"
+
+  # ── Verify (parallel, then join) ────────────────────────────────────────
+  - id: tests
+    kind: tool
+    needs: [impl]
+    run: "{target.test_cmd} --cov=src --cov-report=json"
+    freeze_paths: ["tests/**"]        # D6: immutable during repair
+    gate:                             # G7 — the GREEN gate
+      all:
+        - "pytest.exit_code == 0"
+        - "coverage.percent >= 80"
+        - predicate: ac_test_matrix_complete
+    on_fail:
+      insert: fix
+      scoped_to: failing_module
+      max_attempts: 2
+      then: escalate
+
+  - id: docs
+    kind: codeagent
+    needs: [impl]
+    effort: medium
+    write_scope: ["README.md", "docs/**"]
+    gate:                             # G8 — executable documentation
+      all:
+        - predicate: setup_steps_execute_in_clean_venv
+        - predicate: documented_endpoints_match_openapi
+
+  - id: security
+    kind: tool
+    needs: [impl]
+    run: orchestrator.gates.security_scan
+    autonomy: REVIEW
+    escalate_when: "any(findings, severity >= HIGH)"   # policy overrides default
+    may_waive: false                  # D15: agents never waive findings
+    gate:                             # G9
+      all:
+        - predicate: no_unapproved_high_findings
+
+  # ── Release readiness ───────────────────────────────────────────────────
+  - id: release-readiness
+    kind: derive                      # deterministic by design (D9)
+    needs: [tests, docs, security]    # join / sync barrier
+    emits: evidence_bundle
+    gate:                             # G10
+      all:
+        - predicate: all_upstream_gates_green
+        - predicate: no_unapproved_high_findings
+        - predicate: lineage_complete
+        - predicate: no_node_in_nonterminal_state
+        - predicate: no_stale_approvals
+
+  - id: accept
+    kind: human
+    needs: [release-readiness]
+    autonomy: APPROVE
+    presents: [release-readiness.artifacts.evidence_bundle]
+```
+
+Two forms of gate appear, as described in §4.7: **expressions** over tool results
+(`pytest.exit_code == 0`) and **named predicates** for semantics no expression should carry
+(`no_stale_approvals`). The engine registers the predicates; the plan composes them.
+
+### The brownfield delta, in full
+
+Adding a scenario means adding nodes — **no new node kinds and no engine change**:
+
+```yaml
+plan: brownfield
+extends: greenfield
+
+insert_after:
+  intake:
+    - id: impact-analysis
+      kind: agent
+      role: codebase-analyst
+      inputs: [target.source, lineage.previous_runs]   # cross-run lineage
+      outputs: [affected_modules, contract_diff, invalidated_decisions,
+                regression_surface, risk_class]
+      gate:
+        all:
+          - predicate: every_referenced_symbol_exists   # catches hallucination
+
+    - id: baseline-capture
+      kind: tool
+      run: orchestrator.workers.snapshot_tree
+      gate:
+        all:
+          - "pytest.exit_code == 0"       # refuse to start from a red baseline
+      on_fail: safe_stop
+
+override:
+  impl:
+    from: impact-analysis.artifacts.affected_modules   # narrower fan-out
+  tests:
+    gate:
+      all:
+        - "pytest.exit_code == 0"
+        - predicate: no_pre_existing_test_regressed     # green → green
+        - predicate: ac_test_matrix_complete
+  design-approval:
+    escalate_when: "contract_diff.breaking == true"     # change control
+
+rollback:
+  restore_from: baseline-capture
+  verify_with: "{target.test_cmd}"
+```
+
+Two new nodes and four overrides. The scheduler, gate evaluator, policy engine, lineage
+recorder, and metrics collector are untouched — which is the claim in D16, stated as a
+diff rather than as an assertion.
+
+The ambiguous scenario needs even less: no new nodes at all. It traverses the
+`clarify-with-human` branch that greenfield skips, because `escalate_when` on
+`ambiguity-triage` fires. Same plan, different path.
