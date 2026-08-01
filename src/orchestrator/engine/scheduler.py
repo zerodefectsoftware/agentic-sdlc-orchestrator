@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 import networkx as nx
 from sqlalchemy.orm import Session
@@ -124,7 +125,9 @@ class Scheduler:
             wave = self._ready(session, run)
             if not wave:
                 break
-            for outcome in self._execute(wave):
+            # Inputs are resolved on the scheduler's thread; workers run on others.
+            material = {node.id: self._inputs(session, run, node) for node in wave}
+            for outcome in self._execute(wave, material):
                 self._record(session, run, outcome)
                 if run.status is not RunStatus.RUNNING:
                     break
@@ -153,25 +156,46 @@ class Scheduler:
         execution = store.get_node(session, run, node_id)
         return execution is not None and execution.status in TERMINAL
 
-    def _execute(self, wave: list[Node]) -> list[Outcome]:
+    def _inputs(self, session: Session, run: Run, node: Node) -> dict[str, str]:
+        """The material a node works from: the requirement, plus upstream artifacts.
+
+        A live agent given nothing has nothing to reason about — the scheduler
+        passed an empty dict until the agent worker existed to notice.
+        """
+        material: dict[str, str] = {}
+
+        requirement = Path(run.requirement_path)
+        if requirement.exists():
+            material["requirement"] = requirement.read_text()
+
+        for dependency in [*node.needs, *node.inputs]:
+            upstream = self._node(dependency.split(".", 1)[0])
+            names = upstream.outputs if upstream else []
+            for output in names:
+                artifact = recorder.latest(session, run, f"{upstream.id}.{output}")
+                if artifact is not None:
+                    material[artifact.name] = self.artifacts.read(artifact)
+        return material
+
+    def _execute(self, wave: list[Node], material: dict[str, dict[str, str]]) -> list[Outcome]:
         """Dispatch a wave concurrently; return outcomes in wave order.
 
         Order is stabilised deliberately: a run's recorded history should not
         depend on which thread finished first.
         """
         if len(wave) == 1:
-            return [self._execute_one(wave[0])]
+            return [self._execute_one(wave[0], material.get(wave[0].id, {}))]
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            return list(pool.map(self._execute_one, wave))
+            return list(pool.map(lambda n: self._execute_one(n, material.get(n.id, {})), wave))
 
-    def _execute_one(self, node: Node) -> Outcome:
+    def _execute_one(self, node: Node, inputs: dict[str, str]) -> Outcome:
         if node.kind in (NodeKind.HUMAN, NodeKind.FANOUT):
             # Neither does work: one blocks on a person, the other shapes the graph.
             return Outcome(node=node)
 
         try:
-            result = self.worker.run(node, {}, WorkScope.for_node(node))
+            result = self.worker.run(node, inputs, WorkScope.for_node(node))
         except WorkerError as exc:
             # The work could not be performed. No facts, so the gate will ERROR —
             # which is the correct verdict, and not something to pre-empt here.

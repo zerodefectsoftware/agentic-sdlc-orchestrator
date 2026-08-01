@@ -23,6 +23,11 @@ from typing import Protocol, runtime_checkable
 from orchestrator.engine.plan import Node
 from orchestrator.gates.facts import FactSet
 
+# What a node is given to work from: artifact name -> body, plus "requirement"
+# for the prose the run started from. Facts are evidence for gates; this is
+# material for work, and conflating them would let a worker gate itself.
+WorkInputs = dict[str, str]
+
 
 class WorkerError(Exception):
     """The worker could not perform the work at all.
@@ -106,4 +111,4 @@ class Worker(Protocol):
 
     name: str
 
-    def run(self, node: Node, inputs: FactSet, scope: WorkScope) -> WorkerResult: ...
+    def run(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> WorkerResult: ...

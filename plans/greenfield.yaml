@@ -53,8 +53,9 @@ nodes:
     stage: design
     role: architect
     needs: [ambiguity-triage]
-    outputs: [spec, openapi, modules, decisions]   # gates read design.spec;
-                                                  # impl fans out over design.modules
+    output_schema: schemas/design.json
+    outputs: [spec, modules]          # gates read design.spec;
+                                      # impl fans out over design.modules
     gate:                             # G3
       all:
         - "openapi.valid == true"
@@ -66,7 +67,7 @@ nodes:
     stage: design
     needs: [design]
     autonomy: APPROVE
-    binds_to: [design.artifacts.openapi, design.artifacts.decisions]
+    binds_to: [design.artifacts.spec]
     # binds_to implements D10: if either artifact is re-derived, this
     # approval reverts to pending and G10 blocks.
 

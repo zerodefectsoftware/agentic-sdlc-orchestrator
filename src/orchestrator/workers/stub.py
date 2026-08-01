@@ -14,11 +14,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from orchestrator.engine.plan import Node
-from orchestrator.gates.facts import Fact, FactSet, FactSource
+from orchestrator.gates.facts import Fact, FactSource
 from orchestrator.workers.base import (
     ProducedArtifact,
     WorkerError,
     WorkerResult,
+    WorkInputs,
     WorkScope,
 )
 
@@ -51,7 +52,7 @@ class StubWorker:
                 else [script]  # a single result is reused for every call
             )
 
-    def run(self, node: Node, inputs: FactSet, scope: WorkScope) -> WorkerResult:
+    def run(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> WorkerResult:
         self.calls.append(node.id)
         script = self._next(node.id)
 

@@ -9,18 +9,24 @@ acceptable is the gate's judgment, made against evidence the worker did not get
 to interpret (D4).
 """
 
+from orchestrator.workers.agent import AgentWorker, CodeAgentWorker
 from orchestrator.workers.base import (
     ProducedArtifact,
     Worker,
     WorkerError,
     WorkerResult,
+    WorkInputs,
     WorkScope,
 )
+from orchestrator.workers.live import LiveWorker
 from orchestrator.workers.replay import RecordingWorker, ReplayWorker
 from orchestrator.workers.stub import StubWorker
 from orchestrator.workers.tool import ToolWorker
 
 __all__ = [
+    "AgentWorker",
+    "CodeAgentWorker",
+    "LiveWorker",
     "ProducedArtifact",
     "RecordingWorker",
     "ReplayWorker",
@@ -29,5 +35,6 @@ __all__ = [
     "Worker",
     "WorkerError",
     "WorkerResult",
+    "WorkInputs",
     "WorkScope",
 ]

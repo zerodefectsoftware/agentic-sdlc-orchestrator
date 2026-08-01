@@ -115,7 +115,7 @@ def test_design_approval_is_bound_to_artifact_versions(plan):
     """D10: approval of a superseded artifact is not approval."""
     node = plan.node("design-approval")
     assert node.autonomy is Autonomy.APPROVE
-    assert node.binds_to == ["design.artifacts.openapi", "design.artifacts.decisions"]
+    assert node.binds_to == ["design.artifacts.spec"]
 
 
 def test_security_findings_cannot_be_waived_by_an_agent(plan):

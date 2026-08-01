@@ -20,7 +20,7 @@ from pathlib import Path
 from orchestrator.config import get_settings
 from orchestrator.engine.plan import Node, RunScheme
 from orchestrator.gates.facts import Fact, FactSet, FactSource
-from orchestrator.workers.base import WorkerError, WorkerResult, WorkScope
+from orchestrator.workers.base import WorkerError, WorkerResult, WorkInputs, WorkScope
 
 MAX_CAPTURED = 20_000  # keep a run's state file readable; the full log stays on disk
 
@@ -34,7 +34,7 @@ class ToolWorker:
         self.cwd = Path(cwd)
         self.timeout = timeout if timeout is not None else get_settings().tool_timeout
 
-    def run(self, node: Node, inputs: FactSet, scope: WorkScope) -> WorkerResult:
+    def run(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> WorkerResult:
         if node.run is None or node.run_scheme is not RunScheme.SH:
             raise WorkerError(
                 f"node '{node.id}' is not a shell command "

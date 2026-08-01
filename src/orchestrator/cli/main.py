@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 from sqlalchemy import select
 
-from orchestrator.config import WorkerMode, get_settings
+from orchestrator.config import MissingCredential, WorkerMode, get_settings
 from orchestrator.engine.loader import PlanError, load_plan
 from orchestrator.engine.scheduler import Scheduler
 from orchestrator.evidence import assemble, render
@@ -32,7 +32,7 @@ from orchestrator.metrics import fleet_metrics, run_metrics
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
 from orchestrator.state.models import Decision, NodeStatus, Run, RunStatus
-from orchestrator.workers import ReplayWorker, StubWorker
+from orchestrator.workers import LiveWorker, ReplayWorker, StubWorker
 from orchestrator.workers import stub as scripts
 
 app = typer.Typer(
@@ -70,11 +70,13 @@ def _worker():
         case WorkerMode.REPLAY:
             return ReplayWorker()
         case WorkerMode.LIVE:
-            settings.require_api_key()
-            raise typer.BadParameter(
-                "ORCHESTRATOR_WORKER=live needs the agent worker, which is not built yet. "
-                "Use replay to run against recorded fixtures."
-            )
+            try:
+                settings.require_api_key()
+            except MissingCredential as exc:
+                # The message already names the way out; a traceback would bury it.
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1) from exc
+            return LiveWorker()
         case _:
             return StubWorker(default=scripts.declared_outputs())
 

@@ -224,18 +224,18 @@ def test_a_missing_recording_is_an_error_not_a_pass(tmp_path):
 def test_different_inputs_get_different_recordings(tmp_path):
     """The same node given different upstream artifacts is different work."""
     n = node()
-    first = {"design.version": Fact(1, FactSource.DERIVED)}
-    second = {"design.version": Fact(2, FactSource.DERIVED)}
+    first = {"design.spec": '{"elements": []}'}
+    second = {"design.spec": '{"elements": [{"id": "E1", "kind": "endpoint"}]}'}
     assert fixture_key(n, first) != fixture_key(n, second)
 
     ReplayWorker(tmp_path).path_for(n, first).parent.mkdir(parents=True, exist_ok=True)
     assert ReplayWorker(tmp_path).path_for(n, first) != ReplayWorker(tmp_path).path_for(n, second)
 
 
-def test_fixture_key_is_stable_across_fact_ordering():
+def test_fixture_key_is_stable_across_input_ordering():
     n = node()
-    a = {"x": Fact(1, FactSource.TOOL), "y": Fact(2, FactSource.TOOL)}
-    b = {"y": Fact(2, FactSource.TOOL), "x": Fact(1, FactSource.TOOL)}
+    a = {"x": "one", "y": "two"}
+    b = {"y": "two", "x": "one"}
     assert fixture_key(n, a) == fixture_key(n, b)
 
 

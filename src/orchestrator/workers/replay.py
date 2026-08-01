@@ -20,24 +20,26 @@ from pathlib import Path
 
 from orchestrator.config import get_settings
 from orchestrator.engine.plan import Node
-from orchestrator.gates.facts import Fact, FactSet, FactSource
+from orchestrator.gates.facts import Fact, FactSource
 from orchestrator.workers.base import (
     ProducedArtifact,
     Worker,
     WorkerError,
     WorkerResult,
+    WorkInputs,
     WorkScope,
 )
 
 
-def fixture_key(node: Node, inputs: FactSet) -> str:
+def fixture_key(node: Node, inputs: WorkInputs) -> str:
     """Identify a recording by the node and the inputs it saw.
 
     Inputs are part of the key because the same node given different upstream
     artifacts is different work — replaying the first recording over the second
     would fabricate a result that never happened.
     """
-    seen = {key: repr(fact.value) for key, fact in sorted(inputs.items())}
+    seen = {key: hashlib.sha256(body.encode()).hexdigest()[:12]
+            for key, body in sorted(inputs.items())}
     payload = json.dumps({"node": node.id, "inputs": seen}, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -52,7 +54,7 @@ class ReplayWorker:
             Path(fixtures_dir) if fixtures_dir is not None else get_settings().fixtures_dir
         )
 
-    def run(self, node: Node, inputs: FactSet, scope: WorkScope) -> WorkerResult:
+    def run(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> WorkerResult:
         path = self.path_for(node, inputs)
         if not path.exists():
             raise WorkerError(
@@ -62,7 +64,7 @@ class ReplayWorker:
             )
         return decode(json.loads(path.read_text()))
 
-    def path_for(self, node: Node, inputs: FactSet) -> Path:
+    def path_for(self, node: Node, inputs: WorkInputs) -> Path:
         return self.fixtures_dir / node.id / f"{fixture_key(node, inputs)}.json"
 
 
@@ -80,7 +82,7 @@ class RecordingWorker:
         )
         self.name = f"recording:{inner.name}"
 
-    def run(self, node: Node, inputs: FactSet, scope: WorkScope) -> WorkerResult:
+    def run(self, node: Node, inputs: WorkInputs, scope: WorkScope) -> WorkerResult:
         result = self.inner.run(node, inputs, scope)
 
         path = self.fixtures_dir / node.id / f"{fixture_key(node, inputs)}.json"
