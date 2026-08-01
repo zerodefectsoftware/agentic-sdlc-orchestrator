@@ -41,6 +41,24 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def as_utc(moment: datetime) -> datetime:
+    """Normalise a timestamp for arithmetic.
+
+    SQLite does not preserve tzinfo, so a timestamp written as aware comes back
+    naive. Comparing a freshly created timestamp with a reloaded one therefore
+    raises — which would break metrics on exactly the runs that matter most, the
+    ones resumed after a safe-stop.
+    """
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def elapsed_ms(start: datetime | None, end: datetime | None) -> int | None:
+    """Milliseconds between two recorded moments, or None if either is missing."""
+    if start is None or end is None:
+        return None
+    return int((as_utc(end) - as_utc(start)).total_seconds() * 1000)
+
+
 def new_id() -> str:
     return uuid.uuid4().hex
 

@@ -28,6 +28,7 @@ def render_markdown(bundle: EvidenceBundle) -> str:
         _stages(bundle),
         _artifacts(bundle),
         _counts(bundle),
+        _metrics(bundle),
     ]
     return "\n\n".join(section for section in sections if section).rstrip() + "\n"
 
@@ -165,6 +166,26 @@ def _counts(bundle: EvidenceBundle) -> str:
     counts = bundle.counts
     lines = ["## Counts", ""]
     lines += [f"- {label.replace('_', ' ')}: {value}" for label, value in counts.items()]
+    return "\n".join(lines)
+
+
+def _metrics(bundle: EvidenceBundle) -> str:
+    """Reliability metrics, with the caveat attached rather than left implicit."""
+    if not bundle.metrics:
+        return ""
+
+    lines = ["## Reliability", ""]
+    for label, value in bundle.metrics.items():
+        rendered = "—" if value is None else value
+        if isinstance(value, float):
+            rendered = f"{value:.2f}"
+        lines.append(f"- {label.replace('_', ' ')}: {rendered}")
+
+    lines += [
+        "",
+        "> These describe one run. Across three scenarios they are instrumentation, "
+        "not statistics — no significance is claimed.",
+    ]
     return "\n".join(lines)
 
 

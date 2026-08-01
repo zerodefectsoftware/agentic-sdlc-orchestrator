@@ -64,9 +64,9 @@ class AttemptRecord:
 
     @property
     def duration_ms(self) -> int | None:
-        if self.finished_at is None:
-            return None
-        return int((self.finished_at - self.started_at).total_seconds() * 1000)
+        from orchestrator.state.models import elapsed_ms
+
+        return elapsed_ms(self.started_at, self.finished_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +130,7 @@ class EvidenceBundle:
     nodes: list[NodeRecord] = field(default_factory=list)
     approvals: list[ApprovalRecord] = field(default_factory=list)
     artifacts: list[ArtifactRecord] = field(default_factory=list)
+    metrics: dict[str, object] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     # views a reviewer asks for

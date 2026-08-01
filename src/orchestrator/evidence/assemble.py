@@ -23,6 +23,7 @@ from orchestrator.evidence.bundle import (
     NodeRecord,
 )
 from orchestrator.lineage import query
+from orchestrator.metrics import run_metrics
 from orchestrator.state import store
 from orchestrator.state.models import Artifact, NodeExecution, Run
 
@@ -46,6 +47,7 @@ def assemble(session: Session, run: Run) -> EvidenceBundle:
             _approval(approval, stale=approval.id in stale) for approval in run.approvals
         ],
         artifacts=[_artifact(session, artifact) for artifact in _artifacts(session, run)],
+        metrics=run_metrics(session, run).summary(),
     )
 
 
