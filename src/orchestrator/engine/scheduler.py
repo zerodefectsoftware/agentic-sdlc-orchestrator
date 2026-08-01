@@ -36,7 +36,7 @@ from orchestrator.engine.loader import dependency_graph
 from orchestrator.engine.plan import Gate, Node, NodeKind, Plan
 from orchestrator.gates import GateResult, Verdict, evaluate_gate
 from orchestrator.gates.facts import FactSet
-from orchestrator.gates.registry import PredicateRegistry
+from orchestrator.gates.registry import PredicateContext, PredicateRegistry
 from orchestrator.gates.registry import registry as default_registry
 from orchestrator.lineage import recorder
 from orchestrator.policy.failure import Action, escalation_node, respond_to
@@ -206,7 +206,7 @@ class Scheduler:
         if outcome.result:
             produced = [self._store(session, run, attempt, a) for a in outcome.result.artifacts]
 
-        verdict, gate_result = self._evaluate(node, outcome)
+        verdict, gate_result = self._evaluate(session, run, node, outcome)
         if gate_result is not None:
             store.record_gate(
                 session,
@@ -271,8 +271,11 @@ class Scheduler:
         for child in self._children_of(session, run, node):
             self._runtime[child.id] = child
             if store.get_node(session, run, child.id) is None:
-                store.insert_node(session, run, child.id, str(child.kind), str(child.stage))
+                store.insert_node(
+                    session, run, child.id, str(child.kind), str(child.stage), _config(child)
+                )
             self._extra_needs.setdefault(node.id, []).append(child.id)
+        self._persist_edges(session, run, node.id)
 
         self._materialised.add(node.id)
         execution.status = NodeStatus.PENDING  # re-enters once its children pass
@@ -304,13 +307,29 @@ class Scheduler:
             for index, item in enumerate(items)
         ]
 
-    def _evaluate(self, node: Node, outcome: Outcome) -> tuple[Verdict, GateResult | None]:
+    def _evaluate(
+        self, session: Session, run: Run, node: Node, outcome: Outcome
+    ) -> tuple[Verdict, GateResult | None]:
         """A node without a gate is accepted on completion; with one, the gate decides."""
         if node.gate is None:
             return (Verdict.ERROR if outcome.error else Verdict.PASS), None
 
-        result = evaluate_gate(node.gate, outcome.facts, registry=self.registry)
+        result = evaluate_gate(
+            node.gate,
+            outcome.facts,
+            registry=self.registry,
+            context=self._context(session, run, node),
+        )
         return result.verdict, result
+
+    def _context(self, session: Session, run: Run, node: Node) -> PredicateContext:
+        """What predicates are allowed to look at.
+
+        Without this, every predicate that reads run state — stale approvals,
+        traceability matrices, lineage completeness — raises and the gate ERRORs.
+        The unit tests never saw it because they call predicates directly.
+        """
+        return PredicateContext(session=session, run=run, artifacts=self.artifacts, node=node)
 
     # ----------------------------------------------------------------- #
     # consequences
@@ -362,7 +381,9 @@ class Scheduler:
             return
 
         condition = Gate(all_checks=[node.escalate_when])
-        verdict = evaluate_gate(condition, facts, registry=self.registry).verdict
+        verdict = evaluate_gate(
+            condition, facts, registry=self.registry, context=self._context(session, run, node)
+        ).verdict
         if verdict is Verdict.FAIL:
             return
 
@@ -377,8 +398,7 @@ class Scheduler:
         fix_id = f"{repair.insert}:{node.id}"
 
         if store.get_node(session, run, fix_id) is None:
-            store.insert_node(session, run, fix_id, str(NodeKind.CODEAGENT), str(node.stage))
-            self._runtime[fix_id] = Node(
+            fix = Node(
                 id=fix_id,
                 kind=NodeKind.CODEAGENT,
                 stage=node.stage,
@@ -388,12 +408,17 @@ class Scheduler:
                 write_scope=list(node.write_scope) or ["target/shortener/**"],
                 freeze_paths=list(node.freeze_paths),
             )
+            self._runtime[fix_id] = fix
+            store.insert_node(
+                session, run, fix_id, str(NodeKind.CODEAGENT), str(node.stage), _config(fix)
+            )
 
         # The failed node re-enters only after the fix has run. Without this edge
         # both are PENDING with no dependency between them, so the wave would
         # re-run the failed node alongside its own repair.
         if fix_id not in self._extra_needs.setdefault(node.id, []):
             self._extra_needs[node.id].append(fix_id)
+        self._persist_edges(session, run, node.id)
 
         execution.status = NodeStatus.PENDING
         session.flush()
@@ -406,7 +431,12 @@ class Scheduler:
         self._runtime[escalation.id] = escalation
 
         store.insert_node(
-            session, run, escalation.id, str(NodeKind.HUMAN), str(escalation.stage)
+            session,
+            run,
+            escalation.id,
+            str(NodeKind.HUMAN),
+            str(escalation.stage),
+            _config(escalation),
         )
         recorder.request_approval(session, run, node_id=escalation.id, artifacts=[])
         store.finish_run(session, run, status=RunStatus.BLOCKED, stop_reason=response.reason)
@@ -459,6 +489,27 @@ class Scheduler:
     # helpers
     # ----------------------------------------------------------------- #
 
+    def rehydrate(self, session: Session, run: Run) -> None:
+        """Rebuild in-memory state for a run that a previous process started.
+
+        Without this, `orchestrator resume` would see an inserted node in the
+        database and have no definition to dispatch it with — making safe-stop
+        resumable only for runs that never inserted anything.
+        """
+        for execution in store.all_nodes(session, run):
+            if execution.config:
+                self._runtime[execution.node_id] = Node.model_validate(execution.config)
+            if execution.extra_needs:
+                self._extra_needs[execution.node_id] = list(execution.extra_needs)
+            if execution.kind == NodeKind.FANOUT and execution.extra_needs:
+                self._materialised.add(execution.node_id)
+
+    def _persist_edges(self, session: Session, run: Run, node_id: str) -> None:
+        execution = store.get_node(session, run, node_id)
+        if execution is not None:
+            execution.extra_needs = list(self._extra_needs.get(node_id, []))
+            session.flush()
+
     def _node(self, node_id: str) -> Node | None:
         try:
             return self.plan.node(node_id)
@@ -488,6 +539,11 @@ def _status_for(verdict: Verdict) -> NodeStatus:
         Verdict.FAIL: NodeStatus.FAILED,
         Verdict.ERROR: NodeStatus.ERRORED,
     }[verdict]
+
+
+def _config(node: Node) -> dict:
+    """Serialise an inserted node so a later process can dispatch it."""
+    return node.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
 def _substitute(pattern: str, item: dict) -> str:

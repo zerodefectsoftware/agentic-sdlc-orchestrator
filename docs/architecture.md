@@ -783,6 +783,7 @@ nodes:
     stage: requirements
     role: analyst
     output_schema: schemas/requirement_register.json
+    outputs: [register]              # gates read intake.register
     effort: medium                    # structured extraction; depth adds little
     gate:                             # G1
       all:
@@ -814,7 +815,8 @@ nodes:
     stage: design
     role: architect
     needs: [ambiguity-triage]
-    outputs: [openapi, data_model, modules, decisions]
+    outputs: [spec, openapi, modules, decisions]   # gates read design.spec;
+                                                  # impl fans out over design.modules
     gate:                             # G3
       all:
         - "openapi.valid == true"
@@ -846,6 +848,7 @@ nodes:
     kind: codeagent
     stage: verification
     role: test-author                 # deliberately NOT the implementer (D5)
+    outputs: [suite]                  # gates read tests-acceptance.suite
     needs: [scaffold]
     inputs: [intake.artifacts.acceptance_criteria]
     write_scope: ["target/tests/**"]
@@ -890,6 +893,7 @@ nodes:
     kind: codeagent
     stage: documentation
     role: technical-writer
+    outputs: [readme]                 # gates read docs.readme
     needs: [impl]
     effort: medium
     write_scope: ["target/README.md", "target/docs/**"]
@@ -903,6 +907,7 @@ nodes:
     stage: verification
     needs: [impl]
     run: py:orchestrator.gates.security_scan
+    outputs: [report]                 # gates read security.report
     autonomy: REVIEW
     escalate_when:                    # policy overrides the node default
       predicate: has_high_severity_finding

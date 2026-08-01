@@ -152,6 +152,13 @@ class NodeExecution(Base):
     stage: Mapped[str] = mapped_column(String(32), index=True)
     status: Mapped[NodeStatus] = mapped_column(_enum(NodeStatus), default=NodeStatus.PENDING)
     inserted: Mapped[bool] = mapped_column(default=False)  # not in the authored plan
+
+    # An inserted node has no entry in the plan file, so its definition is stored
+    # here. Without this a resumed process could see the node but not dispatch it —
+    # which would make safe-stop resumable only for runs that never inserted
+    # anything, i.e. only the runs that never needed it.
+    config: Mapped[dict | None] = mapped_column(JSON, default=None)
+    extra_needs: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

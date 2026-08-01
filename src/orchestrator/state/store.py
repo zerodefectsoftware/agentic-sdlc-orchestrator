@@ -92,7 +92,12 @@ def start_run(
 
 
 def insert_node(
-    session: Session, run: Run, node_id: str, kind: str, stage: str
+    session: Session,
+    run: Run,
+    node_id: str,
+    kind: str,
+    stage: str,
+    config: dict | None = None,
 ) -> NodeExecution:
     """Materialise a node that was not in the authored plan (§6).
 
@@ -101,7 +106,7 @@ def insert_node(
     planned and which were a response to what happened.
     """
     node = NodeExecution(
-        run_id=run.id, node_id=node_id, kind=kind, stage=stage, inserted=True
+        run_id=run.id, node_id=node_id, kind=kind, stage=stage, inserted=True, config=config
     )
     session.add(node)
     session.flush()

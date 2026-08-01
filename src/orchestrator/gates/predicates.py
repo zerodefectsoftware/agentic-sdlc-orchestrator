@@ -125,7 +125,7 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
     )
     def requirement_design_matrix_complete(context: PredicateContext) -> tuple[bool, str]:
         register = _load(context, "intake.register", RequirementRegister)
-        design = _load(context, "design.design", Design)
+        design = _load(context, "design.spec", Design)
 
         satisfied = {rid for element in design.elements for rid in element.satisfies}
         orphans = [r.id for r in register.requirements if r.id not in satisfied]
@@ -139,7 +139,7 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
     )
     def no_unmapped_design_elements(context: PredicateContext) -> tuple[bool, str]:
         register = _load(context, "intake.register", RequirementRegister)
-        design = _load(context, "design.design", Design)
+        design = _load(context, "design.spec", Design)
 
         known = {r.id for r in register.requirements}
         invented = [
@@ -280,7 +280,7 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
         "documented_endpoints_match_openapi", "the docs describe the API that exists"
     )
     def documented_endpoints_match_openapi(context: PredicateContext) -> tuple[bool, str]:
-        design = _load(context, "design.design", Design)
+        design = _load(context, "design.spec", Design)
         session, run, artifacts = context.require("session", "run", "artifacts")
 
         readme = recorder.latest(session, run, "docs.readme")

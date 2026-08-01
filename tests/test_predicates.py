@@ -204,7 +204,7 @@ def test_a_requirement_with_no_design_is_caught(session, run, artifacts, registr
     """Nothing silently dropped between stages."""
     record(session, run, artifacts, "intake.register", REGISTER)
     partial = Design(elements=[DesignElement(id="E1", kind="endpoint", satisfies=["R1"])])
-    record(session, run, artifacts, "design.design", partial)
+    record(session, run, artifacts, "design.spec", partial)
 
     passed, detail = check(
         registry, "requirement_design_matrix_complete", context(session, run, artifacts)
@@ -218,7 +218,7 @@ def test_a_design_element_nobody_asked_for_is_caught(session, run, artifacts, re
     record(session, run, artifacts, "intake.register", REGISTER)
     padded = DESIGN.model_copy(deep=True)
     padded.elements.append(DesignElement(id="E9", kind="endpoint", satisfies=["R99"]))
-    record(session, run, artifacts, "design.design", padded)
+    record(session, run, artifacts, "design.spec", padded)
 
     passed, detail = check(
         registry, "no_unmapped_design_elements", context(session, run, artifacts)
@@ -230,7 +230,7 @@ def test_a_design_element_nobody_asked_for_is_caught(session, run, artifacts, re
 
 def test_a_complete_matrix_passes_in_both_directions(session, run, artifacts, registry):
     record(session, run, artifacts, "intake.register", REGISTER)
-    record(session, run, artifacts, "design.design", DESIGN)
+    record(session, run, artifacts, "design.spec", DESIGN)
     ctx = context(session, run, artifacts)
 
     assert check(registry, "requirement_design_matrix_complete", ctx)[0]
@@ -388,7 +388,7 @@ def test_working_setup_steps_pass(session, run, artifacts, registry):
 
 
 def test_an_undocumented_endpoint_is_caught(session, run, artifacts, registry):
-    record(session, run, artifacts, "design.design", DESIGN)
+    record(session, run, artifacts, "design.spec", DESIGN)
     body = "## API\n\nPOST /shorten — create a short link\n"
     artifact = recorder.record_artifact(session, run, name="docs.readme", content=body)
     artifact.path = str(artifacts.write(run.id, "docs.readme", artifact.version, body))

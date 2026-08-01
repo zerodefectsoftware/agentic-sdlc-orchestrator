@@ -96,6 +96,25 @@ def unevaluable() -> WorkerResult:
     return WorkerResult()
 
 
+def declared_outputs(namespace: str = "tool") -> Callable[[Node], WorkerResult]:
+    """A clean run that produces whatever artifacts the node declares.
+
+    Makes `--worker stub` useful for walking a real plan: downstream nodes that
+    read `design.artifacts.openapi` find something there, so the graph's shape
+    can be exercised end to end without a model.
+    """
+
+    def script(node: Node) -> WorkerResult:
+        return WorkerResult(
+            facts={f"{namespace}.exit_code": Fact(0, FactSource.TOOL, "stub")},
+            artifacts=tuple(
+                ProducedArtifact(f"{node.id}.{output}", "{}") for output in node.outputs
+            ),
+        )
+
+    return script
+
+
 def self_reported(claim: str = "impl.complete") -> WorkerResult:
     """An agent asserting its own success — inadmissible as gate evidence (D4)."""
     return WorkerResult(facts={claim: Fact(True, FactSource.AGENT, "stub-agent")})
