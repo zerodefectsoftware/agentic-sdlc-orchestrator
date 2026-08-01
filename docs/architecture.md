@@ -779,6 +779,7 @@ nodes:
 
   - id: docs
     kind: codeagent
+    role: technical-writer
     needs: [impl]
     effort: medium
     write_scope: ["README.md", "docs/**"]
@@ -802,6 +803,7 @@ nodes:
   - id: release-readiness
     kind: derive                      # deterministic by design (D9)
     needs: [tests, docs, security]    # join / sync barrier
+    run: orchestrator.evidence.assemble
     emits: evidence_bundle
     gate:                             # G10
       all:
