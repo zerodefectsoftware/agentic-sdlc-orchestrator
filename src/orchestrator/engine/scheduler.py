@@ -138,10 +138,17 @@ class Scheduler:
                 break
             # Inputs are resolved on the scheduler's thread; workers run on others.
             material = {node.id: self._inputs(session, run, node) for node in wave}
+
+            # Every outcome of the wave is recorded, including the ones that
+            # arrive after something blocks the run. `_execute` has already run
+            # the whole wave — the sessions happened, the files are on disk —
+            # so stopping here would leave work in the target with no attempt,
+            # no changeset and no gate verdict behind it. Five implementers were
+            # lost that way: real code, no lineage. The `while` condition is
+            # what stops the *next* wave; this loop only writes down what
+            # already happened.
             for outcome in self._execute(wave, material):
                 self._record(session, run, outcome)
-                if run.status is not RunStatus.RUNNING:
-                    break
 
         return self._settle(session, run)
 
@@ -377,7 +384,10 @@ class Scheduler:
                 gate=template.gate,
                 model=template.model,
                 effort=template.effort,
-                retry_budget=template.retry_budget,
+                # Without this a child's budget is None, which reads as zero:
+                # any gate failure escalates to a human immediately instead of
+                # retrying, on work that is often retryable.
+                retry_budget=template.retry_budget or self.plan.defaults.retry_budget,
                 autonomy=template.autonomy,
             )
             for index, item in enumerate(items)

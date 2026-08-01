@@ -672,3 +672,52 @@ def test_each_fanout_child_checks_only_its_own_module(session, tmp_path):
     child = scheduler._node("impl:api")
     assert child.verify == ["sh:ruff check target/api"]
     assert statuses(session, run)["impl:api"] is NodeStatus.PASSED
+
+
+BLOCKING_WAVE = """
+plan: t
+version: 1
+nodes:
+  - id: seed
+    kind: tool
+    stage: implementation
+    run: sh:make
+  - id: alpha
+    kind: tool
+    stage: verification
+    needs: [seed]
+    run: sh:pytest
+    gate: {all: ["pytest.exit_code == 0"]}
+  - id: beta
+    kind: tool
+    stage: verification
+    needs: [seed]
+    run: sh:ruff
+    gate: {all: ["ruff.exit_code == 0"]}
+"""
+
+
+def test_every_outcome_of_a_wave_is_recorded_even_after_one_blocks_the_run(session, tmp_path):
+    """The wave has already run when recording starts.
+
+    Five implementers once wrote real code into the target and had their
+    attempts, changesets and gate verdicts discarded because a sibling escalated
+    first — code in the tree with no lineage behind it, which is the one thing
+    the evidence bundle may not contain.
+    """
+    worker = StubWorker(
+        {
+            "seed": scripts.passing("make"),
+            "alpha": scripts.failing("pytest"),   # escalates: no retry budget, no on_fail
+            "beta": scripts.passing("ruff"),
+        }
+    )
+    _, run = run_plan(session, plan_from(tmp_path, BLOCKING_WAVE), worker)
+
+    assert run.status is RunStatus.BLOCKED          # alpha escalated
+    recorded = statuses(session, run)
+    assert recorded["alpha"] is NodeStatus.FAILED
+    assert recorded["beta"] is NodeStatus.PASSED    # not silently dropped
+
+    beta = store.get_node(session, run, "beta")
+    assert beta.attempts, "beta ran but no attempt was recorded"
