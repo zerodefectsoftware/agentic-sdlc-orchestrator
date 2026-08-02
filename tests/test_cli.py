@@ -592,6 +592,33 @@ def test_withdrawing_a_result_withdraws_what_was_built_on_it(cli, workspace):
         assert store.get_node(session, run, "design-approval").status is NodeStatus.STALE
 
 
+def test_withdrawing_a_result_reopens_the_work_that_failed_on_it(cli, workspace):
+    """A FAIL computed from a withdrawn input is as much not-evidence as a PASS.
+
+    And leaving it FAILED is worse than leaving it green: FAILED is neither
+    PENDING nor STALE, so nothing collects it and the run wedges on the next
+    resume.
+    """
+    start(cli, workspace)
+    with store.Store().session() as session:
+        run_id = session.scalars(select(Run)).all()[-1].id
+    invoke(cli, workspace, "approve", run_id, "design-approval", "--by", "alice")
+
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        store.get_node(session, run, "verify").status = NodeStatus.FAILED
+        session.commit()
+
+    invoke(
+        cli, workspace, "invalidate", run_id, "build",
+        "--by", "ops", "--why", "the build output was wrong",
+    )
+
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "verify").status is NodeStatus.STALE
+
+
 def test_withdrawing_a_result_reopens_the_checkpoint_waiting_on_it(cli, workspace):
     """A blocked checkpoint is waiting to approve versions that are being replaced.
 

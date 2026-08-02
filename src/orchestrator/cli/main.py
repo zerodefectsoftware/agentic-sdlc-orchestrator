@@ -631,17 +631,24 @@ def invalidate(
             # would consume the *new* output is still PASSED, so it is never
             # collected and never sees it.
             #
-            # BLOCKED counts too, and for a sharper reason: a checkpoint waiting
-            # on a person is waiting to approve artifact versions that are being
-            # replaced. Left blocked it is never collected and never re-asked,
-            # so the run wedges the moment the withdrawn node passes again. Its
-            # open request is withdrawn with it — a decision on a superseded
-            # version is not a decision anyone should be held to.
+            # Every recorded verdict, not just the green ones. A FAIL computed
+            # from a withdrawn input is as much not-evidence as a PASS, and
+            # leaving it FAILED is worse than leaving it green: FAILED is
+            # neither PENDING nor STALE, so nothing collects it and the run
+            # wedges. BLOCKED counts for a sharper reason still — a checkpoint
+            # waiting on a person is waiting to approve versions that are being
+            # replaced, so its open request is withdrawn with it. A decision on
+            # a superseded version is not one anybody should be held to.
+            #
+            # SKIPPED is left alone: an optional node whose trigger never fired
+            # has no verdict to withdraw.
             for descendant in sorted(nx.descendants(graph, node_id)):
                 downstream = store.get_node(session, run, descendant)
                 if downstream is None or downstream.status not in (
                     NodeStatus.PASSED,
                     NodeStatus.BLOCKED,
+                    NodeStatus.FAILED,
+                    NodeStatus.ERRORED,
                 ):
                     continue
 
