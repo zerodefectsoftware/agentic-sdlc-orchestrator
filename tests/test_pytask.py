@@ -18,6 +18,7 @@ from orchestrator.artifacts import (
     Ambiguity,
     Design,
     DesignElement,
+    Disposition,
     Export,
     Interface,
     Module,
@@ -567,3 +568,51 @@ def test_missing_documentation_is_an_error_not_a_failing_doc(tmp_path):
     (tmp_path / "target" / "README.md").unlink()
     with pytest.raises(WorkerError, match="no documentation"):
         execute_setup_steps(task)
+
+
+def test_policy_overrides_an_assumption_the_agent_made_above_the_threshold():
+    """The knob that calibrates autonomy cannot be set by the agent it governs.
+
+    The analyst disposes of what it judges minor before triage runs, and
+    skipping those made the threshold inert: the ambiguous plan lowers it to
+    MEDIUM precisely to escalate mediums, and escalated none.
+    """
+    register = RequirementRegister(
+        ambiguities=[
+            Ambiguity(
+                id="A1",
+                question="fail open or closed?",
+                severity=Severity.MEDIUM,
+                disposition=Disposition.ASSUMPTION,
+                answer="fail open",
+            )
+        ]
+    )
+    probe = task({"intake.register": register.model_dump_json()}, params={"threshold": "medium"})
+    output = triage_ambiguities(probe)
+
+    assert output.facts["ambiguities.escalated"] == 1
+    updated = RequirementRegister.model_validate_json(output.artifacts["intake.register"])
+    assert not updated.ambiguities[0].is_disposed
+    assert "analyst proposed: fail open" in updated.ambiguities[0].answer
+
+
+def test_a_human_answer_is_never_reopened_by_policy():
+    """An assumption is a proposal; a decision is a decision."""
+    register = RequirementRegister(
+        ambiguities=[
+            Ambiguity(
+                id="A1",
+                question="301 or 302?",
+                severity=Severity.HIGH,
+                disposition=Disposition.RESOLVED,
+                answer="301 — answered by Komali Avadhani",
+            )
+        ]
+    )
+    probe = task({"intake.register": register.model_dump_json()}, params={"threshold": "medium"})
+    output = triage_ambiguities(probe)
+
+    assert output.facts["ambiguities.escalated"] == 0
+    updated = RequirementRegister.model_validate_json(output.artifacts["intake.register"])
+    assert updated.ambiguities[0].is_disposed

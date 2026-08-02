@@ -32,10 +32,26 @@ def triage_ambiguities(task: Task) -> TaskOutput:
     assumed = []
 
     for ambiguity in register.ambiguities:
-        if ambiguity.is_disposed:
+        # A human answer is a decision and is never revisited. An *agent's*
+        # assumption is a proposal: the analyst disposes of what it judges minor
+        # before this policy ever runs, and skipping those made the threshold
+        # inert — `ambiguous.yaml` lowers it to MEDIUM precisely to escalate
+        # mediums, and escalated none, because the analyst had already assumed
+        # them. The knob that calibrates autonomy cannot be set by the agent it
+        # governs.
+        if ambiguity.disposition is Disposition.RESOLVED:
             continue
         if ambiguity.severity.rank >= threshold.rank:
+            if ambiguity.disposition is Disposition.ASSUMPTION:
+                # Keep what the analyst proposed — it is useful context for the
+                # person now being asked — but the question is open again.
+                ambiguity.answer = (
+                    f"analyst proposed: {ambiguity.answer}" if ambiguity.answer else None
+                )
+                ambiguity.disposition = None
             escalate.append(ambiguity.id)
+            continue
+        if ambiguity.is_disposed:
             continue
         # Below the threshold: record the assumption and carry it forward, so a
         # reviewer can see what was decided on their behalf and why.
