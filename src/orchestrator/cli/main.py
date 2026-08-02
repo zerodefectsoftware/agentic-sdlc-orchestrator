@@ -673,6 +673,12 @@ def invalidate(
             # SKIPPED is left alone: an optional node whose trigger never fired
             # has no verdict to withdraw.
             for descendant in sorted(nx.descendants(graph, node_id)):
+                # Retirement is unconditional: a descendant already STALE from an
+                # earlier withdrawal still has open questions about verdicts that
+                # are being withdrawn again, and skipping it left two of them
+                # blocking every wave.
+                _retire_escalations(session, run, descendant, by, why)
+
                 downstream = store.get_node(session, run, descendant)
                 if downstream is None or downstream.status not in (
                     NodeStatus.PASSED,
@@ -694,7 +700,6 @@ def invalidate(
 
                 downstream.status = NodeStatus.STALE
                 console.print(f"[dim]  stale[/dim] {descendant} — built on it")
-                _retire_escalations(session, run, descendant, by, why)
 
             _retire_escalations(session, run, node_id, by, why)
 
