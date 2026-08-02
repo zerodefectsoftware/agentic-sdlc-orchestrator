@@ -94,21 +94,16 @@ override:
         - "clarification.resolved > 0"  # the checkpoint produced an answer
         - predicate: no_ambiguity_without_disposition
 
-  # Reads the normalized register, not the raw one.
-  design:
-    id: design
-    kind: agent
-    stage: design
-    role: architect
-    needs: [ambiguity-triage, normalize-clarification]
-    inputs: [intake.artifacts.register]
-    output_schema: schemas/design.json
-    outputs: [spec, modules]
-    gate:                               # G3
-      all:
-        - predicate: contract_is_valid
-        - predicate: requirement_design_matrix_complete
-        - predicate: no_unmapped_design_elements
+  # `design` is deliberately NOT overridden. It already needs both triage and
+  # normalization in the base plan, so it already reads the normalized register
+  # — and an override here would be a second copy of the architect's contract
+  # to keep in step. This scenario changes how a requirement is understood, not
+  # how it is designed or built.
+  #
+  # It used to be overridden, from before the architect wrote stub packages
+  # (D24/D25). The copy went stale exactly as D19 predicts a duplicated node
+  # will: it declared `outputs: [spec, modules]` with no interfaces, while the
+  # fan-out it feeds still reads `design.artifacts.interfaces`.
 
   # An assumption that survives to release must have been surfaced, not
   # inherited. The register travels in the evidence bundle either way; this
