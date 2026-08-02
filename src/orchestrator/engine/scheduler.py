@@ -132,6 +132,13 @@ class Scheduler:
         Returns rather than waiting. A blocked run persists and the process can
         exit; `orchestrator approve` resumes it (§6).
         """
+        # Staleness is a property of state, not an event. Reconciling only when
+        # an artifact is re-derived misses every approval that went stale in a
+        # previous process — including one that went stale before the reconciler
+        # existed — and leaves the run blocked on a question nobody can answer.
+        self._reopen_stale_approvals(session, run)
+        session.commit()
+
         while run.status is RunStatus.RUNNING:
             wave = self._ready(session, run)
             if not wave:
@@ -928,13 +935,37 @@ class Scheduler:
         unfinished = store.nodes_in_nonterminal_state(session, run)
         if not unfinished:
             store.finish_run(session, run, status=RunStatus.COMPLETED)
-        else:
+            return run
+
+        # A run waiting on a person has not failed. Every unfinished node being a
+        # checkpoint with an open question is the *designed* resting state, and
+        # calling it FAILED is both wrong in the record and wrong operationally:
+        # tooling keys on BLOCKED to know a decision is wanted, so a stale
+        # approval that correctly re-opened a checkpoint reported the run as
+        # failed and nothing offered to ask.
+        waiting = {
+            approval.node_id
+            for approval in run.approvals
+            if approval.decision is Decision.PENDING
+        }
+        blocked = [n for n in unfinished if n.node_id in waiting]
+        if blocked and all(
+            n.node_id in waiting or n.status is NodeStatus.PENDING for n in unfinished
+        ):
             store.finish_run(
                 session,
                 run,
-                status=RunStatus.FAILED,
-                stop_reason=f"no node can advance; stuck: {[n.node_id for n in unfinished]}",
+                status=RunStatus.BLOCKED,
+                stop_reason=f"awaiting {', '.join(sorted(n.node_id for n in blocked))}",
             )
+            return run
+
+        store.finish_run(
+            session,
+            run,
+            status=RunStatus.FAILED,
+            stop_reason=f"no node can advance; stuck: {[n.node_id for n in unfinished]}",
+        )
         return run
 
 

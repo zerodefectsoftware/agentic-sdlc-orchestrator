@@ -1140,3 +1140,38 @@ def test_a_superseded_approval_is_re_asked_not_merely_noticed(session, tmp_path)
     assert approval.decision is Decision.PENDING
     assert "superseded" in approval.note
     assert statuses(session, run)["verify"] is NodeStatus.STALE
+
+
+def test_a_run_waiting_on_a_person_is_blocked_not_failed(session, tmp_path):
+    """The designed resting state is not a failure.
+
+    Calling it FAILED is wrong in the record and wrong operationally: tooling
+    keys on BLOCKED to know a decision is wanted, so a re-opened checkpoint
+    reported the run as failed and nothing offered to ask.
+    """
+    worker = StubWorker(default=scripts.passing("make"))
+    scheduler, run = run_plan(session, plan_from(tmp_path, LINEAR), worker)
+
+    # A checkpoint re-opens after the fact, as a stale approval does.
+    recorder.request_approval(session, run, node_id="verify", artifacts=[])
+    store.get_node(session, run, "verify").status = NodeStatus.BLOCKED
+    run.status = RunStatus.RUNNING
+    session.flush()
+
+    scheduler.advance(session, run)
+
+    assert run.status is RunStatus.BLOCKED
+    assert "verify" in run.stop_reason
+
+
+def test_a_run_with_nothing_to_do_and_nobody_to_ask_still_fails(session, tmp_path):
+    """Blocked has to keep meaning "waiting on you", or it means nothing."""
+    worker = StubWorker(default=scripts.passing("make"))
+    scheduler, run = run_plan(session, plan_from(tmp_path, LINEAR), worker)
+
+    store.get_node(session, run, "verify").status = NodeStatus.BLOCKED   # no approval open
+    run.status = RunStatus.RUNNING
+    session.flush()
+
+    scheduler.advance(session, run)
+    assert run.status is RunStatus.FAILED
