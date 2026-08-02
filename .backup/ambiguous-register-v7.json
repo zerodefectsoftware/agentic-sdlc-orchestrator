@@ -1,0 +1,258 @@
+{
+  "requirements": [
+    {
+      "id": "R1",
+      "statement": "The shortener enforces a request rate limit so that a single client cannot consume service capacity beyond a defined threshold.",
+      "acceptance": [
+        {
+          "id": "AC1.1",
+          "given": "a rate limit of N requests per window is configured for a client identity",
+          "when": "that client sends N requests within one window",
+          "then": "all N requests are served normally (no request is rejected for rate-limit reasons)"
+        },
+        {
+          "id": "AC1.2",
+          "given": "a rate limit of N requests per window is configured",
+          "when": "the same client sends the N+1th request inside the same window",
+          "then": "that request is rejected with the configured rate-limit rejection response and is not processed by the shortener's business logic (no new short link is created, no redirect lookup is performed)"
+        },
+        {
+          "id": "AC1.3",
+          "given": "client A has exhausted its limit",
+          "when": "client B (a different identity under the configured limiting key) sends a request in the same window",
+          "then": "client B's request is served normally"
+        },
+        {
+          "id": "AC1.4",
+          "given": "a client was throttled in the previous window",
+          "when": "a new window begins and the client sends a request",
+          "then": "the request is served normally"
+        }
+      ]
+    },
+    {
+      "id": "R2",
+      "statement": "A client that exceeds the limit receives a clear, machine-readable rejection telling it that it was rate limited and when it may retry.",
+      "acceptance": [
+        {
+          "id": "AC2.1",
+          "given": null,
+          "when": "a request is rejected for exceeding the limit",
+          "then": "the response status code is 429 and the body identifies the reason as rate limiting"
+        },
+        {
+          "id": "AC2.2",
+          "given": null,
+          "when": "a request is rejected for exceeding the limit",
+          "then": "the response carries a Retry-After header whose value is a non-negative number of seconds no greater than the window length"
+        },
+        {
+          "id": "AC2.3",
+          "given": null,
+          "when": "a request is rejected for exceeding the limit",
+          "then": "the rejection is emitted as a countable event (metric or log record) attributable to the limiting key, observable by an operator"
+        }
+      ]
+    },
+    {
+      "id": "R3",
+      "statement": "Rate limiting keeps the shortener serving legitimate traffic while a single client floods it.",
+      "acceptance": [
+        {
+          "id": "AC3.1",
+          "given": "one client is sending requests at 20x its configured limit",
+          "when": "a separate well-behaved client issues requests within its own limit",
+          "then": "the well-behaved client receives successful responses for 100% of those requests"
+        },
+        {
+          "id": "AC3.2",
+          "given": "one client is sending requests at 20x its configured limit",
+          "when": "the well-behaved client's redirect latency is measured",
+          "then": "p95 redirect latency stays within the pre-existing latency budget measured without the flood"
+        },
+        {
+          "id": "AC3.3",
+          "given": "rate limiting is enabled and traffic is entirely within limits",
+          "when": "redirect latency is compared against the same load with rate limiting disabled",
+          "then": "the p95 latency increase attributable to rate limiting is bounded by an agreed budget (see A15)"
+        }
+      ]
+    }
+  ],
+  "ambiguities": [
+    {
+      "id": "A1",
+      "question": "What identity is the limit keyed on — client IP, API key/account, short-code, or a single global bucket?",
+      "severity": "high",
+      "rationale": "This is the whole design. Per-IP limiting punishes users behind shared NAT/corporate proxies and does nothing against a distributed flood; per-API-key limiting presumes authenticated clients, which a public shortener redirect path does not have; a global bucket protects the service but lets one abuser deny everyone. AC1.3 cannot even be written as a test until this is fixed.",
+      "impact": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "disposition": "resolved",
+      "answer": "per client IP. A2: both. A3: ... A4: ... A5: fail open — answered by Komali Avadhani"
+    },
+    {
+      "id": "A2",
+      "question": "Which traffic is limited — short-link creation only, redirect resolution only, or both (and with the same numbers)?",
+      "severity": "high",
+      "rationale": "Creation and redirection have opposite profiles. Creation is expensive, low-volume, and abuse-prone; redirection is the cheap hot path and a popular link can legitimately generate thousands of requests per second from many users. Applying one limit to both will either leave creation unprotected or break viral links, which is a direct conflict with R3.",
+      "impact": [
+        "R1",
+        "R3"
+      ],
+      "disposition": null,
+      "answer": null
+    },
+    {
+      "id": "A3",
+      "question": "What are the actual numbers — requests per window, window length, and burst allowance?",
+      "severity": "high",
+      "rationale": "'Protect the service' is not a threshold. Without a number derived from measured service capacity, the limit is either cosmetic or an outage. Every acceptance criterion in R1 is parameterised on N and the window.",
+      "impact": [
+        "R1",
+        "R3"
+      ],
+      "disposition": null,
+      "answer": null
+    },
+    {
+      "id": "A4",
+      "question": "Must the limit be enforced across all service instances (shared counter store), or is per-instance counting acceptable?",
+      "severity": "high",
+      "rationale": "Missing prerequisite: shared enforcement requires a counter store (e.g. Redis) that nobody asked for — new dependency, new failure mode, new latency on the redirect path. Per-instance counting is free but multiplies the effective limit by the instance count and makes it vary with autoscaling, so the enforced limit becomes non-deterministic and AC1.2 becomes untestable behind a load balancer.",
+      "impact": [
+        "R1",
+        "R3"
+      ],
+      "disposition": null,
+      "answer": null
+    },
+    {
+      "id": "A5",
+      "question": "If the rate-limit state store is unreachable or slow, does the limiter fail open (serve everything) or fail closed (reject everything)?",
+      "severity": "high",
+      "rationale": "Directly pits R1 against R3. Fail-open means the protection vanishes exactly when the system is under the stress it was built for; fail-closed converts a limiter dependency outage into a full shortener outage. This must be a human decision, and it also determines whether the limiter needs a local fallback.",
+      "impact": [
+        "R1",
+        "R3"
+      ],
+      "disposition": null,
+      "answer": null
+    },
+    {
+      "id": "A6",
+      "question": "When the service sits behind a proxy or CDN, which value identifies the client — the socket peer address or a forwarded header?",
+      "severity": "medium",
+      "rationale": "If the socket address is used behind a proxy, every request appears to come from one IP and the whole service shares one bucket. If a forwarded header is trusted unconditionally, any caller can spoof it and bypass the limit entirely.",
+      "impact": [
+        "R1"
+      ],
+      "disposition": null,
+      "answer": "analyst proposed: Assume the client IP is taken from the rightmost untrusted entry of X-Forwarded-For when the peer is in a configured trusted-proxy list, and from the socket peer address otherwise."
+    },
+    {
+      "id": "A7",
+      "question": "What HTTP status and body shape does a throttled request receive?",
+      "severity": "medium",
+      "rationale": "429 versus 503 versus a silent connection drop changes client retry behaviour, and 503 will be interpreted by upstream health checks and CDNs as the service being down.",
+      "impact": [
+        "R2"
+      ],
+      "disposition": null,
+      "answer": "analyst proposed: Assume HTTP 429 Too Many Requests with a Retry-After header and the service's existing JSON error body shape."
+    },
+    {
+      "id": "A8",
+      "question": "Which counting algorithm — fixed window, sliding window, or token bucket?",
+      "severity": "medium",
+      "rationale": "A fixed window permits a double-rate burst across the window boundary, which is precisely the spike R3 is meant to absorb; a token bucket smooths it but tolerates configured bursts. The choice changes the observable pass/fail edges of AC1.1 and AC1.2.",
+      "impact": [
+        "R1",
+        "R3"
+      ],
+      "disposition": null,
+      "answer": "analyst proposed: Assume a token bucket (sustained rate N per window, burst capacity equal to N) unless the boundary-burst behaviour of a fixed window is explicitly acceptable."
+    },
+    {
+      "id": "A9",
+      "question": "Are any callers exempt — health/readiness probes, internal monitoring, admin operations, allowlisted partners?",
+      "severity": "medium",
+      "rationale": "If probes share a bucket with public traffic, a flood causes health checks to be throttled and the orchestrator will restart or remove healthy instances, amplifying the incident the limiter was added to prevent.",
+      "impact": [
+        "R1",
+        "R3"
+      ],
+      "disposition": null,
+      "answer": "analyst proposed: Assume health and readiness endpoints are exempt from rate limiting, and an operator-managed allowlist of identities is supported but empty by default."
+    },
+    {
+      "id": "A10",
+      "question": "Do requests that are themselves rejected count against the client's budget?",
+      "severity": "low",
+      "rationale": "If rejections do not consume budget, an attacker's cost is unchanged and the client can hammer the limiter forever; if they do, a misbehaving client stays locked out until it backs off.",
+      "impact": [
+        "R1"
+      ],
+      "disposition": "assumption",
+      "answer": "Assume rejected requests do count against the budget (the limiter is consulted and consumes before the decision)."
+    },
+    {
+      "id": "A11",
+      "question": "Are current limit and remaining quota exposed to well-behaved clients on successful responses?",
+      "severity": "low",
+      "rationale": "Without these headers, clients cannot self-throttle and will discover the limit only by tripping it, which increases the rejection traffic the limiter must absorb.",
+      "impact": [
+        "R2"
+      ],
+      "disposition": "assumption",
+      "answer": "Assume standard RateLimit-Limit / RateLimit-Remaining / RateLimit-Reset headers are set on rate-limited responses and on successful responses for limited routes."
+    },
+    {
+      "id": "A12",
+      "question": "Are limits changeable at runtime, or only via redeploy/restart?",
+      "severity": "medium",
+      "rationale": "During an active incident, operators typically need to tighten or loosen a limit within minutes; if the value is compile- or deploy-time only, the protection cannot be tuned when it matters, but runtime configuration adds a config-distribution mechanism nobody asked for.",
+      "impact": [
+        "R1"
+      ],
+      "disposition": null,
+      "answer": "analyst proposed: Assume limits are read from deployment configuration at startup, with no runtime mutation API in scope."
+    },
+    {
+      "id": "A13",
+      "question": "Does 'protect the service' mean request-rate limiting only, or does it also include request/URL size caps, concurrency caps, or abuse/spam detection on submitted URLs?",
+      "severity": "medium",
+      "rationale": "Scope boundary. Rate limiting alone does not stop a slow trickle of malicious or oversized submissions, so if the asker's real concern is abuse rather than load, this delivery will not address it.",
+      "impact": [
+        "R1",
+        "R3"
+      ],
+      "disposition": null,
+      "answer": "analyst proposed: Assume scope is limited to request-rate limiting; payload size caps, concurrency limits and content abuse detection are out of scope."
+    },
+    {
+      "id": "A14",
+      "question": "Is the rate limiter expected to be part of the application, or is an existing edge component (CDN, API gateway, ingress) the intended place for it?",
+      "severity": "medium",
+      "rationale": "If an edge limiter already exists, in-application limiting duplicates it and the two will disagree about counts and client identity; if it does not, the application must carry the state store from A4.",
+      "impact": [
+        "R1"
+      ],
+      "disposition": null,
+      "answer": "analyst proposed: Assume enforcement is implemented in the shortener service itself, since no edge component was named."
+    },
+    {
+      "id": "A15",
+      "question": "What added latency and availability cost is acceptable on the redirect hot path for the limiter check itself?",
+      "severity": "medium",
+      "rationale": "A network round-trip to a shared counter store on every redirect can dominate the redirect's own cost, so the protection mechanism becomes the performance regression. AC3.3 has no pass threshold until this number exists.",
+      "impact": [
+        "R3"
+      ],
+      "disposition": null,
+      "answer": "analyst proposed: Assume a budget of at most 2ms added p95 latency on the redirect path, achieved with a local in-process check where possible."
+    }
+  ]
+}

@@ -91,27 +91,91 @@ its producing attempt recorded in SQLite.
 
 ## 5. What live running actually found
 
-Seven defects, none visible to the test suite, all from first contact with a real run.
-This is the most useful evidence in the submission and is not presented as embarrassment:
+**Roughly thirty defects, none visible to a 496-test suite, all from executing the
+system rather than testing it.** This is the most useful evidence in the submission and
+is not presented as embarrassment — it is what validation looks like when the thing
+being validated is a control plane.
 
-| Defect | Layer | Consequence if unfound |
-| --- | --- | --- |
-| Fan-out reported PASS having done nothing on resume | runtime | **A node that did no work recording success**, and every gate downstream reasoning from it |
-| STALE nodes never re-entered the graph | runtime | Re-planning was a one-way door onto a wedged run |
-| `invalidate` did not cascade to consumers | governance | A run completing around a change nobody applied |
-| Cascade missed blocked and failed nodes | governance | Wedged run; a checkpoint waiting on a superseded question |
-| No way to re-gate without re-doing work | governance | A 12-minute agent session repeated because a plan omitted a param |
-| Preflight ignored check params | validation | Three gate checks ERRORing after the expensive part |
-| Gate linted the whole target | plan | The architect failed on a suite it is frozen out of |
+They cluster, and the clustering is the finding.
 
-**The pattern is worth stating plainly:** the unit tests covered the *happy* graph. Every
-defect was in re-entry — resume, invalidate, re-check — which is the part of an orchestrator
-that only exercises when something has already gone wrong.
+### Re-entry: resume, invalidate, re-check — 8 defects
 
-Two of them are direct evidence for what D1 traded away. The correct production answer for
-durable execution is Temporal; it was rejected on time budget, and these are the bill.
+| Defect | Consequence if unfound |
+| --- | --- |
+| A fan-out reported PASS having done nothing on resume | **A node that did no work recording success**, with every gate downstream reasoning from it |
+| STALE nodes never re-entered the graph | Re-planning was a one-way door onto a wedged run |
+| Fan-out children identified by history, not by their source artifact | An obsolete decomposition satisfied a current one |
+| A re-materialised child kept the SKIPPED status of the run that abandoned it | Six of eight modules silently never ran |
+| A re-entered child ran the definition persisted when it was created | Two implementers judged by a gate two plan revisions old |
+| Reclaimed children ran in the same wave as the parent redefining them | The redefinition never applied |
+| A node left RUNNING by a killed process was uncollectable | A killed run could never advance again |
+| A retry could not see its own last gate after a wave committed | Retry feedback silently returned nothing |
 
----
+### Governance: the mechanisms that make a decision mean something — 9 defects
+
+| Defect | Consequence if unfound |
+| --- | --- |
+| `invalidate` did not cascade to consumers | A run completing around a change nobody applied |
+| The cascade missed blocked, failed and errored nodes | Wedged runs; checkpoints waiting on superseded questions |
+| `invalidate` never retired the escalations it made moot | Dead checkpoints blocked four consecutive attempts |
+| **`revert_to_pending` was dead code** | D10's "a re-derived artifact reverts its approval" was documentation, not behaviour |
+| `stale_approvals` counted every approval ever recorded | Approving v2 made a run permanently stale — even after approving v4 |
+| A run waiting on a person recorded as FAILED | Tooling keys on BLOCKED; nothing offered to ask |
+| An interactive decision recorded without passing the checkpoint | A question answerable by neither route |
+| No way to stop a run | Ending one meant finding the process and killing it |
+
+### Gates that could not hold — 7 defects
+
+| Defect | Consequence if unfound |
+| --- | --- |
+| `documented_endpoints_match_openapi` compared `/api/links` with `POST /api/links` | **No README could ever have passed.** Five attempts on correct documentation |
+| `setup_steps_execute_in_clean_venv` demanded a fact nothing produced | Same: unsatisfiable, and reported as FAIL rather than ERROR |
+| `no_node_in_nonterminal_state` counted the node asking and the checkpoint after it | The final gate waited for itself. Being last, nothing had reached it to find out |
+| `ambiguities.total > 0` named a fact only the agent could produce (D4 forbids it) | ERROR on the ambiguous plan's first run |
+| `session.files_written > 0` measured activity, not outcome | Failed an implementer for correctly writing nothing to a finished module |
+| Preflight ignored required params, and never looked inside fan-out templates | Every child ERRORed after its work was done and paid for |
+| The `design` gate linted the whole target | The architect failed on a test suite it is frozen out of by D6 |
+
+### Policy and plans — 4 defects
+
+| Defect | Consequence if unfound |
+| --- | --- |
+| **The escalation threshold was inert** | `ambiguous.yaml` lowers it to MEDIUM to make a person decide more; the analyst had already disposed of every medium before the policy ran. Ten questions decided by the agent that raised them |
+| brownfield's `impl` template dropped `freeze_paths` | **D6 silently void**: implementers could edit the suite judging them, and weakening a test makes it greener |
+| brownfield's `design` inherited a write scope and stub checks from a node it no longer resembled | A blast radius advertised that the node could not use |
+| ambiguous's `design` override went stale exactly as D19 predicts a copy will | Would have failed the moment it ran |
+
+### The pattern
+
+**The unit tests covered the graph running forwards.** Every defect above is in re-entry,
+governance, or a check that had never been reached — the parts of an orchestrator that
+only execute when something has already gone wrong, which is exactly when they matter.
+
+Two conclusions follow, and both are now evidence-backed rather than asserted:
+
+- **The control plane was worth building; the durable-execution layer underneath it was
+  not.** Eight of these vanish under Temporal or an equivalent, and several more never
+  happen with per-wave commits — which took twenty minutes once observability was finally
+  treated as a feature rather than a nicety.
+- **A gate nobody has reached is a gate nobody has tested.** Four checks in this system
+  were structurally unsatisfiable and passed review, because reviewing a predicate is not
+  the same as running one.
+
+### What the guardrails did when it mattered
+
+Not everything found was a defect. Three of the design's central claims were observed
+holding, under conditions nobody arranged:
+
+- **The write ceiling refused an agent reaching for the rules.** The documentation agent,
+  failing a gate, tried to edit `src/orchestrator/gates/predicates.py` — the file
+  implementing the check that was failing it — and was refused. It tried `/tmp` on the
+  previous attempt. D7 said "a misbehaving agent cannot reach the orchestrator that
+  governs it"; that is now a recorded denial rather than a claim.
+- **Blast radius held between peers.** Four implementers independently tried to edit
+  `main`, and all four were refused. Each then reported it, which is the escalation path
+  working.
+- **The stub-only gate held.** The architect had every opportunity to implement rather
+  than declare: 24 functions, 0 implemented, verified by parsing rather than by asking.
 
 ## 6. Assumptions
 

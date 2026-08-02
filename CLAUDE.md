@@ -4,56 +4,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-**A live greenfield run is parked mid-flight — resume it, do not start a new one.**
-Run `610c782beb9a4ea6bc7c8d06444eb432`, status BLOCKED, in `runs/`. Everything through
-`tests-acceptance` is green and cost real model calls; only implementation is outstanding:
+**Greenfield ran end to end and was accepted (2026-08-02).** Run
+`610c782beb9a4ea6bc7c8d06444eb432`, status `completed`, evidence bundle **RELEASABLE**.
 
-| Node | State | Artifact worth reading |
-| --- | --- | --- |
-| intake → normalize-clarification | passed | `intake.register` v1 → v3 (analyst → policy → human answers) |
-| design | **withdrawn, re-running** | v1 **rejected** and v2 approved (trail preserved); v3 predates the stub packages |
-| tests-acceptance | **stale** — re-authored on resume | 38 tests, 20 criteria, RED gate held |
-| scaffold, impl | **pending** | re-run these |
-| tests, docs, security, release-readiness, accept | pending | |
+| | |
+| --- | --- |
+| Target | 8 modules, ~1,550 lines, **86 tests passing, 93.64% coverage** |
+| Run | 20 nodes, 63 attempts, 11 incidents, all recovered |
+| Suite | 496 tests, deterministic, no model calls |
 
-**The plan changed under this run (D24/D25), so resuming is not a bare `resume`.** The
-architect now authors the interface contract *and writes it as stub packages* — every
-export, signature, exception and base class — which is what lets `impl` fan out over
-modules again. `scaffold` no longer generates; it audits the tree against the contract.
-The parked design predates all of this, so:
+`.backup/` holds a copy of the implemented target and the ambiguous scenario's register.
+Restore with `cp -r .backup/shortener-greenfield-implemented target/shortener` if a run
+overwrites it.
 
-```bash
-.venv/bin/orchestrator invalidate 610c782beb9a4ea6bc7c8d06444eb432 design \
-  --by <you> --why "predates the stub packages"     # cascades downstream
-.venv/bin/orchestrator resume     610c782beb9a4ea6bc7c8d06444eb432
-```
+**Scenario status**
 
-Expect: one architect **code-agent session** → **a human approval** (the binding reverts to
-pending, D10) → the contract audit → the suite re-authored → eight implementers in
-parallel. Needs `ANTHROPIC_API_KEY` in `.env` (already present) and
-`ORCHESTRATOR_WORKER=live`.
+| Scenario | State |
+| --- | --- |
+| greenfield | complete — the only run in the database |
+| ambiguous | proven through requirements: 15 ambiguities from one sentence, 5 escalated. Its run was deleted; the register is in `.backup/`. **Now has its own target profile** (`config/target.ratelimit.yaml`) so it cannot overwrite the shortener |
+| brownfield | written and audited against the current engine, **never executed** |
 
-`target/` is back to `target/tests/` (conftest + the agent-written suite) with no
-`shortener/` package: the previous wave's module code had no lineage behind it (a scheduler
-bug, since fixed) and was deleted. **The architect** now recreates the packages, as typed
-stubs whose bodies all raise `NotImplementedError`.
-
-The old `impl:*` children and their escalation are SKIPPED — they belong to the first
-fan-out, which had no contract behind it. The new fan-out materialises fresh children.
-
-`docs/observing-a-run.md` says where every node's output lands and what to read at each step.
-`docs/orchestrator-design.md` explains how the components interact and how data moves —
-read it before the architecture doc if the runtime is unfamiliar.
+**Read `docs/demo.md` before demonstrating anything.** It says what to show, in what
+order, and which commands are safe to run live.
 
 **Known gaps, in the order they will bite:**
 
-- The scope guard has never been observed *refusing* a write in a live run. Every write so
-  far has been in scope, so D7's enforcement is demonstrated only by construction.
-- A code-agent session records nothing until it ends, and mid-wave state is invisible while
-  a wave is open. Fine for a demo, wrong for audit-grade observability.
-- Nothing has run past `impl`: `tests`, `docs`, `security`, release readiness and the
-  evidence bundle are all unexercised live.
-- Brownfield and ambiguous have never been run at all.
+- **A killed session's writes stay written.** Greenfield has no baseline to restore from —
+  that is brownfield's `baseline-capture`. `orchestrator stop --force` ends a run and
+  reopens its nodes, but cannot undo files already on disk.
+- **A code-agent session records nothing until it ends.** `watch` shows which node is
+  running, not what it is doing.
+- **A waived escalation makes a node SKIPPED, and SKIPPED satisfies dependents exactly as
+  PASSED does.** Waiving `normalize-clarification` let `design` run on an un-normalized
+  register three times.
+- **A blocked checkpoint does not stop work already dispatched in the same wave.** Both
+  can be collected together; the checkpoint blocks the run while its wave-mate keeps
+  writing.
+- Brownfield has never run.
 
 ## Commands
 

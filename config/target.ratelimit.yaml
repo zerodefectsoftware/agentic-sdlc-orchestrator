@@ -1,0 +1,30 @@
+# Target profile for the ambiguous scenario.
+#
+# Scenarios share an engine, not a codebase. Pointing `ambiguous` at the same
+# target as `greenfield` meant its architect wrote stub packages over a working
+# implementation the moment the run got past requirements — which is exactly
+# what happened, and cost a restore from backup.
+#
+# The ambiguous requirement ("add rate limiting to protect the service") is also
+# not the shortener: it is a different system with a different decomposition.
+# Sharing a root was never right, only convenient.
+
+target:
+  name: ratelimit
+  root: target/ratelimit
+  tests_root: target/ratelimit_tests
+  language: python
+
+  commands:
+    test: .venv/bin/pytest target/ratelimit_tests
+    test_cov: .venv/bin/pytest target/ratelimit_tests --cov=target/ratelimit --cov-report=json
+    lint: .venv/bin/ruff check target/ratelimit
+    lint_path: .venv/bin/ruff check
+    format: .venv/bin/ruff format target/ratelimit
+    serve: .venv/bin/uvicorn ratelimit.main:app
+
+  write_ceiling:
+    - "target/**"
+
+  thresholds:
+    coverage_min: 80
