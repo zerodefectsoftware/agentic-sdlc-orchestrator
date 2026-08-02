@@ -37,6 +37,7 @@ def render_json(bundle: EvidenceBundle) -> str:
     payload = asdict(bundle)
     payload["counts"] = bundle.counts
     payload["releasable"] = bundle.is_releasable
+    payload["superseded_gates"] = len(bundle.superseded_gates)
     return json.dumps(payload, indent=2, sort_keys=True, default=_encode) + "\n"
 
 

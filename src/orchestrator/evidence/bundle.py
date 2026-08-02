@@ -138,8 +138,27 @@ class EvidenceBundle:
 
     @property
     def blocking_gates(self) -> list[GateOutcome]:
-        """Every verdict that stopped something — the first thing to read."""
-        return [gate for node in self.nodes for gate in node.gates if gate.blocked]
+        """Every verdict that is *still* stopping something.
+
+        A node's earlier verdicts are history, not blockers: a run that failed
+        twice and passed on the third attempt is not blocked, and reading every
+        recorded verdict said otherwise — a completed run whose every gate ended
+        green rendered as NOT RELEASABLE, which is the opposite of what happened.
+
+        The superseded attempts stay in the bundle under their node, where a
+        reviewer wants them. They just do not count as blocking.
+        """
+        return [
+            gate
+            for node in self.nodes
+            if node.gates and node.gates[-1].blocked
+            for gate in [node.gates[-1]]
+        ]
+
+    @property
+    def superseded_gates(self) -> list[GateOutcome]:
+        """Verdicts a later attempt replaced — the run's argument with itself."""
+        return [gate for node in self.nodes for gate in node.gates[:-1] if gate.blocked]
 
     @property
     def stages(self) -> dict[str, list[NodeRecord]]:
