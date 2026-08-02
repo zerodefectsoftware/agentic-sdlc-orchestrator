@@ -17,7 +17,11 @@
       "covers": ["AC1.1"]
     },
     {
-      "id": "test_r1_create.py::test_invalid_urls_are_rejected_with_400_and_error_code",
+      "id": "test_r1_create.py::test_invalid_urls_are_rejected_with_400_and_error_envelope",
+      "covers": ["AC1.2"]
+    },
+    {
+      "id": "test_r1_create.py::test_self_referential_url_is_rejected",
       "covers": ["AC1.2"]
     },
     {
@@ -41,6 +45,18 @@
       "covers": ["AC1.4"]
     },
     {
+      "id": "test_r1_create.py::test_generate_code_draws_from_the_documented_alphabet",
+      "covers": ["AC1.4"]
+    },
+    {
+      "id": "test_r1_create.py::test_is_valid_code_rejects_malformed_codes",
+      "covers": ["AC1.4"]
+    },
+    {
+      "id": "test_r1_create.py::test_is_valid_code_accepts_a_minted_code",
+      "covers": ["AC1.4"]
+    },
+    {
       "id": "test_r2_redirect.py::test_redirect_location_is_byte_identical_to_stored_url",
       "covers": ["AC2.1"]
     },
@@ -57,6 +73,10 @@
       "covers": ["AC2.2"]
     },
     {
+      "id": "test_r2_redirect.py::test_unknown_code_returns_the_error_envelope",
+      "covers": ["AC2.2"]
+    },
+    {
       "id": "test_r2_redirect.py::test_unknown_code_records_no_analytics_event",
       "covers": ["AC2.2"]
     },
@@ -65,15 +85,19 @@
       "covers": ["AC2.3"]
     },
     {
-      "id": "test_r3_manage.py::test_metadata_returns_long_url_created_at_and_click_count",
+      "id": "test_r3_manage.py::test_metadata_returns_long_url_created_at_and_total_clicks",
       "covers": ["AC3.1"]
     },
     {
-      "id": "test_r3_manage.py::test_metadata_click_count_reflects_recorded_clicks",
+      "id": "test_r3_manage.py::test_metadata_total_clicks_reflects_recorded_clicks",
       "covers": ["AC3.1"]
     },
     {
       "id": "test_r3_manage.py::test_delete_returns_204_and_code_no_longer_redirects",
+      "covers": ["AC3.2"]
+    },
+    {
+      "id": "test_r3_manage.py::test_repeated_delete_is_idempotent",
       "covers": ["AC3.2"]
     },
     {
@@ -117,11 +141,23 @@
       "covers": ["AC4.2"]
     },
     {
+      "id": "test_r4_analytics.py::test_time_series_rejects_an_unsupported_interval",
+      "covers": ["AC4.2"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_time_series_rejects_an_inverted_window",
+      "covers": ["AC4.2"]
+    },
+    {
       "id": "test_r4_analytics.py::test_breakdown_by_referrer_groups_clicks",
       "covers": ["AC4.3"]
     },
     {
       "id": "test_r4_analytics.py::test_breakdown_by_device_and_browser_class",
+      "covers": ["AC4.3"]
+    },
+    {
+      "id": "test_r4_analytics.py::test_breakdowns_are_scoped_to_the_requested_window",
       "covers": ["AC4.3"]
     },
     {
@@ -145,7 +181,7 @@
       "covers": ["AC5.2"]
     },
     {
-      "id": "test_r5_reliability.py::test_health_returns_200_while_dependencies_are_reachable",
+      "id": "test_r5_reliability.py::test_health_returns_200_while_the_datastore_is_reachable",
       "covers": ["AC5.3"]
     },
     {

@@ -669,6 +669,66 @@ def test_children_inherit_the_stage_of_the_fanout(session, tmp_path, fanout_work
     assert scheduler._runtime["impl:api"].stage is Stage.IMPLEMENTATION
 
 
+def test_a_resumed_fanout_re_materialises_when_the_decomposition_changed(
+    session, tmp_path, fanout_worker
+):
+    """Children are identified by the source artifact, never by history.
+
+    Resuming treated "this fanout has recorded children" as "this fanout is
+    done". A run whose design had since been re-derived found the previous
+    decomposition's children — every one SKIPPED — and passed on the spot.
+    Nothing was implemented, `impl` recorded PASSED with no attempts, and
+    verification ran against a tree of stubs.
+    """
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    run = scheduler.start(
+        session, requirement_path="r.md", target_profile="t.yaml"
+    )
+
+    # A previous process left children from a decomposition that no longer exists.
+    for stale in ("impl:web", "impl:cli"):
+        store.insert_node(session, run, stale, "codeagent", "implementation", {})
+        store.get_node(session, run, stale).status = NodeStatus.SKIPPED
+    store.get_node(session, run, "impl").extra_needs = ["impl:web", "impl:cli"]
+    session.flush()
+    scheduler.rehydrate(session, run)
+
+    scheduler.advance(session, run)
+
+    assert scheduler._extra_needs["impl"] == ["impl:api", "impl:storage"]
+    assert set(fanout_worker.calls) >= {"impl:api", "impl:storage"}
+    assert statuses(session, run)["impl"] is NodeStatus.PASSED
+
+
+def test_a_fanout_whose_children_did_not_pass_does_not_pass(session, tmp_path):
+    """A fanout whose children were skipped has not done its work.
+
+    This is the check that would have caught it at the node instead of two
+    stages later, as a pytest failure nobody could attribute.
+    """
+    worker = StubWorker(
+        {"design": scripts.passing("agent", **{"design.modules": MODULES})},
+        default=scripts.passing("codeagent"),
+    )
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, worker, tmp_path)
+    run = scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+    scheduler.advance(session, run)
+
+    # Withdraw the work the children did, leaving the shape intact.
+    for child in ("impl:api", "impl:storage"):
+        store.get_node(session, run, child).status = NodeStatus.SKIPPED
+    store.get_node(session, run, "impl").status = NodeStatus.PENDING
+    run.status = RunStatus.RUNNING
+    session.flush()
+
+    scheduler.advance(session, run)
+
+    assert statuses(session, run)["impl"] is NodeStatus.FAILED
+    assert "children did not" in run.stop_reason
+
+
 def test_a_fanout_whose_source_was_never_produced_fails_loudly(session, tmp_path):
     worker = StubWorker(default=scripts.passing("agent"))  # design produces nothing
     plan = plan_from(tmp_path, FANOUT)

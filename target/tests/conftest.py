@@ -5,21 +5,22 @@ package (D3) — so it is not installed. Its tests put it on the path themselves
 exactly as they would in the repository it came from.
 
 --------------------------------------------------------------------------
-Why this file contains tolerant readers
+Why this file is strict
 --------------------------------------------------------------------------
-The acceptance criteria fix *observable outcomes* (status codes, header values,
-counts) but the design spec does not fix every JSON field name — e.g. E8 says
-the analytics response carries "total clicks plus per-interval counts and
-breakdowns by referrer and by device/browser class" without naming the keys.
+An earlier draft of this suite carried "tolerant readers" that accepted a list
+of plausible JSON key spellings, because the design named the analytics payload
+without fixing its field names. That is no longer true: the architect now ships
+the interface contract as stub packages, and `shortener.main` declares
+`AnalyticsResponse`, `LinkDetailResponse` and `HealthResponse` field by field.
 
-So the readers below accept a small, explicit list of conventional key names
-and fail loudly when none is present. That keeps each test asserting the
-criterion's outcome rather than a key spelling the design never committed to.
-The candidate lists are deliberately short: an unrecognised shape is a failure,
-never a silent pass.
+So the readers below assert the contract's names exactly. A tolerant reader
+against a fixed contract is not robustness — it is a test that would pass on a
+payload the contract forbids, and it hides the one bug most likely to appear
+when eight implementers work in parallel: two modules disagreeing about a key.
 
-Anything the design *did* commit to (301, 7-char base62, 410 on expiry, the
-{code, message, details} error envelope) is asserted exactly.
+Everything asserted here is a commitment something made: the register (A1's 301,
+A6's 60 s, A9's 99.9%, A11's 366 intervals), the design spec (the six routes),
+or the stub contract (every field name and status code).
 """
 
 from __future__ import annotations
@@ -38,13 +39,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest  # noqa: E402
 
 # --------------------------------------------------------------------------- #
-# documented constants — these come from the register and the design, not taste
+# documented constants — these come from the register and the contract, not taste
 # --------------------------------------------------------------------------- #
 
-FRESHNESS_SECONDS = 60.0  # A6: clicks visible in the analytics API within 60s
+FRESHNESS_SECONDS = 60.0  # A6 / analytics.FRESHNESS_SECONDS
 P95_BUDGET_SECONDS = 0.100  # AC2.3: p95 redirect latency under 100 ms
 AVAILABILITY_TARGET = 0.999  # A9: 99.9% successful responses on the redirect path
-MAX_INTERVALS = 366  # A11/E19: time-series capped at 366 intervals
+MAX_INTERVALS = 366  # A11 / analytics.MAX_INTERVALS
+CODE_LENGTH = 7  # codes.CODE_LENGTH
+REDIRECT_STATUS = 301  # A1 / main.REDIRECT_STATUS
+
+# The error envelope is exactly these keys and nothing else (A13, errors.ErrorEnvelope).
+ENVELOPE_KEYS = {"code", "message", "details"}
 
 # A well-formed URL that naive normalisation would mangle — trailing-slash
 # stripping, query re-ordering or percent-decoding all break AC2.1's
@@ -67,39 +73,34 @@ MOBILE_UA = (
 _TMP = tempfile.mkdtemp(prefix="shortener-acceptance-")
 _DB_FILE = str(Path(_TMP) / "acceptance.sqlite3")
 
+# `SHORTENER_` is the prefix config.Settings reads (config.Settings.model_config).
 # One stable datastore for the whole session: every test is scoped to the codes
 # it created, so isolation comes from the codes, not from a fresh file. AC5.1
 # needs the path to survive a re-import, which a per-test file would defeat.
 os.environ.setdefault("SHORTENER_DATABASE_URL", f"sqlite:///{_DB_FILE}")
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_DB_FILE}")
-os.environ.setdefault("SHORTENER_DB_PATH", _DB_FILE)
-os.environ.setdefault("SHORTENER_BASE_URL", "http://testserver")
 
-_APP_CANDIDATES = (
-    # CLAUDE.md documents the entry point as `shortener.main:app`.
-    ("shortener.main", "app"),
-    ("shortener.api", "app"),
-    ("shortener.api.app", "app"),
-    ("shortener.app", "app"),
-)
+# The origin short URLs are built from, and the host creation must refuse to
+# point at (A12). TestClient sends requests to http://testserver.
+SERVICE_BASE_URL = "http://testserver"
+SERVICE_HOST = "testserver"
+os.environ.setdefault("SHORTENER_BASE_URL", SERVICE_BASE_URL)
 
 
 def _load_app():
-    """Return the target's ASGI application, or fail with what was tried."""
-    tried = []
-    for module_name, attr in _APP_CANDIDATES:
-        try:
-            module = importlib.import_module(module_name)
-        except Exception as exc:  # noqa: BLE001 - the reason is the message
-            tried.append(f"{module_name}: {type(exc).__name__}: {exc}")
-            continue
-        app = getattr(module, attr, None)
-        if app is not None:
-            return app
-        tried.append(f"{module_name}: imported but has no attribute {attr!r}")
-    raise RuntimeError(
-        "No ASGI application found in the target. Tried:\n  " + "\n  ".join(tried)
-    )
+    """Return the target's ASGI application.
+
+    The contract fixes the entry point: `shortener.main` exports `app`, assigned
+    by the implementer as `app = create_app()`. There is no candidate list,
+    because there is no longer a choice to be tolerant about.
+    """
+    module = importlib.import_module("shortener.main")
+    app = getattr(module, "app", None)
+    if app is None:
+        raise RuntimeError(
+            "shortener.main imported but exports no `app`. The contract declares "
+            "`app: FastAPI`, assigned by the implementer as `app = create_app()`."
+        )
+    return app
 
 
 def _purge_target_modules() -> None:
@@ -110,9 +111,10 @@ def _purge_target_modules() -> None:
 def _ip_for(nodeid: str) -> str:
     """A deterministic, per-test client IP.
 
-    Rate limiting is keyed on client IP (E13), so tests that share an IP would
-    contend for one token bucket and fail each other. A distinct IP per test
-    makes that impossible — and is exactly the isolation AC5.4 promises.
+    Rate limiting is keyed on client IP (ratelimit module docstring), so tests
+    that shared an IP would contend for one token bucket and fail each other. A
+    distinct IP per test makes that impossible — and is exactly the isolation
+    AC5.4 promises.
     """
     digest = hashlib.md5(nodeid.encode()).digest()
     return f"10.{digest[0]}.{digest[1]}.{digest[2] or 1}"
@@ -165,7 +167,8 @@ def make_client(request):
 
 @pytest.fixture
 def client(app, request):
-    """The primary client: lifespan entered, so background workers are running."""
+    """The primary client: lifespan entered, so storage is open and the
+    analytics drain (analytics.start_recorder) is running."""
     from fastapi.testclient import TestClient
 
     ip = _ip_for(request.node.nodeid)
@@ -225,117 +228,107 @@ def click():
 
 
 # --------------------------------------------------------------------------- #
-# tolerant readers for the analytics response (see module docstring)
+# readers for the analytics response — main.AnalyticsResponse, field for field
 # --------------------------------------------------------------------------- #
 
-_TOTAL_KEYS = ("total_clicks", "total", "clicks", "click_count")
-_SERIES_KEYS = ("series", "time_series", "timeseries", "intervals", "buckets", "by_interval")
-_REFERRER_KEYS = ("referrers", "by_referrer", "referrer", "referrer_breakdown")
-_DEVICE_KEYS = ("devices", "by_device", "device", "device_breakdown")
-_BROWSER_KEYS = ("browsers", "by_browser", "browser", "browser_breakdown")
 
-_COUNT_KEYS = ("count", "clicks", "total")
-_LABEL_KEYS = (
-    "value", "key", "label", "name", "referrer", "device", "browser", "class", "group",
-)
-_START_KEYS = ("start", "bucket", "timestamp", "interval_start", "ts", "time", "at")
-
-
-def _search(body, candidates):
-    """Find the first candidate key, allowing one level of `breakdowns` nesting."""
-    scopes = [body]
-    for container in ("breakdowns", "breakdown", "by", "data"):
-        nested = body.get(container)
-        if isinstance(nested, dict):
-            scopes.append(nested)
-    for scope in scopes:
-        for key in candidates:
-            if key in scope:
-                return scope[key]
-    return None
-
-
-def _require(body, candidates, what):
-    found = _search(body, candidates)
-    if found is None:
+def assert_error_envelope(response, what):
+    """Every non-2xx body is exactly {code, message, details} (A13)."""
+    try:
+        body = response.json()
+    except ValueError:  # pragma: no cover - only reached on a malformed failure
         raise AssertionError(
-            f"analytics response has no {what}: tried keys {list(candidates)}, "
-            f"body keys were {sorted(body)}"
-        )
-    return found
+            f"{what} returned {response.status_code} with a non-JSON body: {response.text!r}"
+        ) from None
+    assert isinstance(body, dict), f"{what} should return an object, got {body!r}"
+    assert set(body) <= ENVELOPE_KEYS, (
+        f"{what} must return only the {{code, message, details}} envelope (A13), "
+        f"got keys {sorted(body)}"
+    )
+    assert isinstance(body.get("code"), str) and body["code"], (
+        f"{what} needs a machine-readable error code (A13), got {body!r}"
+    )
+    assert isinstance(body.get("message"), str) and body["message"], (
+        f"{what} needs a human-readable message (A13), got {body!r}"
+    )
+    return body
 
 
 def read_total(body) -> int:
-    """Total click count from an analytics response."""
-    total = _require(body, _TOTAL_KEYS, "total click count")
+    """`AnalyticsResponse.total_clicks`."""
+    assert "total_clicks" in body, (
+        f"analytics response has no 'total_clicks' (main.AnalyticsResponse), "
+        f"keys were {sorted(body)}"
+    )
+    total = body["total_clicks"]
     assert isinstance(total, int) and not isinstance(total, bool), (
-        f"total click count should be an integer, got {total!r}"
+        f"total_clicks should be an integer, got {total!r}"
     )
     return total
 
 
-def _entry_count(entry):
-    for key in _COUNT_KEYS:
-        if key in entry and isinstance(entry[key], int) and not isinstance(entry[key], bool):
-            return entry[key]
-    raise AssertionError(f"breakdown entry has no integer count: {entry!r}")
-
-
-def _entry_label(entry):
-    for key in _LABEL_KEYS:
-        if key in entry:
-            return "" if entry[key] is None else str(entry[key])
-    raise AssertionError(f"breakdown entry has no label: {entry!r}")
-
-
-def read_breakdown(body, candidates, what) -> dict[str, int]:
-    """Normalise a breakdown to {label: count}, from a list or a mapping."""
-    raw = _require(body, candidates, what)
-    if isinstance(raw, dict):
-        result = {}
-        for label, count in raw.items():
-            assert isinstance(count, int) and not isinstance(count, bool), (
-                f"{what} entry {label!r} should map to an integer, got {count!r}"
-            )
-            result[str(label)] = count
-        return result
-    assert isinstance(raw, list), f"{what} should be a list or mapping, got {type(raw).__name__}"
-    return {_entry_label(entry): _entry_count(entry) for entry in raw}
-
-
 def read_series(body) -> list[tuple[str, int]]:
-    """Normalise the time series to an ordered [(interval_start, count)]."""
-    raw = _require(body, _SERIES_KEYS, "per-interval click counts")
-    assert isinstance(raw, list), (
-        f"time series should be a list of intervals, got {type(raw).__name__}"
+    """`AnalyticsResponse.series` as [(IntervalPoint.start, IntervalPoint.count)]."""
+    assert "series" in body, (
+        f"analytics response has no 'series' (main.AnalyticsResponse), "
+        f"keys were {sorted(body)}"
     )
+    raw = body["series"]
+    assert isinstance(raw, list), f"series should be a list, got {type(raw).__name__}"
     series = []
     for entry in raw:
-        assert isinstance(entry, dict), f"time-series entry should be an object, got {entry!r}"
-        start = None
-        for key in _START_KEYS:
-            if key in entry:
-                start = entry[key]
-                break
-        assert start is not None, (
-            f"time-series entry has no interval start: tried {list(_START_KEYS)}, got {entry!r}"
+        assert isinstance(entry, dict), f"series entry should be an object, got {entry!r}"
+        assert "start" in entry and "count" in entry, (
+            f"series entry must be an IntervalPoint {{start, count}}, got {entry!r}"
         )
-        series.append((str(start), _entry_count(entry)))
+        count = entry["count"]
+        assert isinstance(count, int) and not isinstance(count, bool), (
+            f"series entry count should be an integer, got {entry!r}"
+        )
+        series.append((str(entry["start"]), count))
     return series
 
 
+def read_breakdown(body, key) -> dict[str, int]:
+    """A breakdown list of `BreakdownItem {value, count}`, as {value: count}."""
+    assert key in body, (
+        f"analytics response has no {key!r} breakdown (main.AnalyticsResponse), "
+        f"keys were {sorted(body)}"
+    )
+    raw = body[key]
+    assert isinstance(raw, list), (
+        f"{key} should be a list of BreakdownItem, got {type(raw).__name__}"
+    )
+    result: dict[str, int] = {}
+    for entry in raw:
+        assert isinstance(entry, dict), f"{key} entry should be an object, got {entry!r}"
+        assert "value" in entry and "count" in entry, (
+            f"{key} entry must be a BreakdownItem {{value, count}}, got {entry!r}"
+        )
+        count = entry["count"]
+        assert isinstance(count, int) and not isinstance(count, bool), (
+            f"{key} entry count should be an integer, got {entry!r}"
+        )
+        label = "" if entry["value"] is None else str(entry["value"])
+        assert label not in result, (
+            f"{key} repeats the value {label!r}; a breakdown is a grouped count, "
+            f"so each value appears once"
+        )
+        result[label] = count
+    return result
+
+
 # --------------------------------------------------------------------------- #
-# settling — analytics are eventually consistent (A6)
+# windows — a time-series query must name its window (A11)
 # --------------------------------------------------------------------------- #
 
 
 def default_window(days_back=30, days_forward=1, interval="day"):
     """A wide window that comfortably contains 'now'.
 
-    E8 requires a [start, end) window and an interval for the *time series*;
-    it does not settle whether a caller asking only for the total must supply
-    one. Tests that only care about the total therefore fall back to this
-    window if the endpoint insists on one — see `analytics`.
+    A11 requires every analytics query to name its window, so there is no
+    "omit it and see" path here: tests that only care about the total still
+    pass a window wide enough that widening it cannot change the answer.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -349,19 +342,14 @@ def default_window(days_back=30, days_forward=1, interval="day"):
 
 @pytest.fixture
 def analytics():
-    """GET the analytics endpoint, asserting 200, and return the body."""
+    """GET the analytics endpoint with a window, asserting 200, returning the body."""
 
     def _analytics(client, code, **params):
-        response = client.get(f"/api/links/{code}/analytics", params=params or None)
-        if response.status_code == 400 and not params:
-            # The endpoint requires an explicit window (a legitimate reading of
-            # E8/E19). Retry with one; the totals asserted by the caller are
-            # unaffected by widening the window around 'now'.
-            response = client.get(
-                f"/api/links/{code}/analytics", params=default_window()
-            )
+        query = params or default_window()
+        response = client.get(f"/api/links/{code}/analytics", params=query)
         assert response.status_code == 200, (
-            f"analytics for {code!r} failed: {response.status_code} {response.text}"
+            f"analytics for {code!r} with {query!r} failed: "
+            f"{response.status_code} {response.text}"
         )
         return response.json()
 
@@ -380,7 +368,6 @@ def wait_for_total(analytics):
     def _wait(client, code, expected, timeout=FRESHNESS_SECONDS, **params):
         deadline = time.monotonic() + timeout
         last = None
-        body = None
         while True:
             body = analytics(client, code, **params)
             last = read_total(body)
@@ -402,29 +389,27 @@ def wait_for_total(analytics):
 # --------------------------------------------------------------------------- #
 
 
-def _patch_everywhere(monkeypatch, names, replacement, what):
-    """Replace `names` on every loaded target module that defines one.
+def _patch_everywhere(monkeypatch, name, replacement, what):
+    """Replace `name` on every loaded target module that defines it.
 
-    A module that did `from ... import record_click` holds its own reference,
-    so patching only the defining module would leave the real function on the
-    request path. Patching every binding closes that hole.
+    A module that did `from shortener.analytics import record_click` holds its
+    own reference, so patching only the defining module would leave the real
+    function on the request path. Patching every binding closes that hole.
 
-    The named callables are design commitments, not implementation trivia:
-    E25 puts the click recorder in the analytics module, E24 puts the health
-    reachability ping in the storage module. If none is found the test fails —
-    it never silently passes with nothing injected.
+    The names are contract exports — `analytics.record_click`, `storage.ping` —
+    not guesses. If no binding is found the fixture fails loudly: a criterion
+    that silently injects nothing is a criterion that silently passes.
     """
     patched = []
     for module_name, module in list(sys.modules.items()):
         if module_name != "shortener" and not module_name.startswith("shortener."):
             continue
-        for name in names:
-            if callable(getattr(module, name, None)):
-                monkeypatch.setattr(module, name, replacement, raising=False)
-                patched.append(f"{module_name}.{name}")
+        if callable(getattr(module, name, None)):
+            monkeypatch.setattr(module, name, replacement, raising=False)
+            patched.append(f"{module_name}.{name}")
     if not patched:
         raise AssertionError(
-            f"found no {what} to disable: looked for {list(names)} on the target's "
+            f"found no {what} to disable: looked for {name!r} on the target's loaded "
             f"modules, so this criterion cannot be exercised"
         )
     return patched
@@ -432,17 +417,27 @@ def _patch_everywhere(monkeypatch, names, replacement, what):
 
 @pytest.fixture
 def break_analytics_recorder(monkeypatch):
-    """Make click recording fail on the request path, as AC5.2 requires."""
+    """Make click recording fail on the request path, as AC5.2 requires.
 
-    def _break():
+    Defaults to the failure the contract documents — `record_click` raises
+    `AnalyticsUnavailableError`, which the redirect path must log and swallow —
+    and accepts an arbitrary exception so the test can also prove an
+    *undocumented* failure is absorbed rather than only the expected one.
+    """
+
+    def _break(exc_factory=None):
+        if exc_factory is None:
+
+            def exc_factory():
+                from shortener.errors import AnalyticsUnavailableError
+
+                return AnalyticsUnavailableError("recorder unavailable (injected by AC5.2)")
+
         def _raise(*args, **kwargs):
-            raise RuntimeError("analytics recorder unavailable (injected by AC5.2)")
+            raise exc_factory()
 
         return _patch_everywhere(
-            monkeypatch,
-            ("record_click", "record", "enqueue_click", "enqueue", "submit_click"),
-            _raise,
-            "analytics click recorder",
+            monkeypatch, "record_click", _raise, "analytics click recorder"
         )
 
     return _break
@@ -450,18 +445,18 @@ def break_analytics_recorder(monkeypatch):
 
 @pytest.fixture
 def break_datastore_ping(monkeypatch):
-    """Make the datastore reachability check fail, as AC5.3 requires."""
+    """Make the datastore reachability check fail, as AC5.3 requires.
+
+    `storage.ping()` is the contract's reachability probe and the documented
+    evidence behind GET /health.
+    """
 
     def _break():
-        def _raise(*args, **kwargs):
-            raise RuntimeError("datastore unreachable (injected by AC5.3)")
+        def _false(*args, **kwargs):
+            return False
 
         return _patch_everywhere(
-            monkeypatch,
-            ("ping", "check_health", "healthcheck", "health_check", "is_reachable",
-             "check_reachable", "reachable"),
-            _raise,
-            "datastore reachability check",
+            monkeypatch, "ping", _false, "datastore reachability check"
         )
 
     return _break

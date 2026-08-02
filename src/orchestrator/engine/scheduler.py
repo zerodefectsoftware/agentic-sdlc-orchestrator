@@ -349,19 +349,56 @@ class Scheduler:
         Waiting matters: downstream nodes say `needs: [impl]`, and if the fanout
         completed the moment it materialised, verification would start before a
         single module had been written.
+
+        **A fanout's children are identified by its source artifact, never by
+        history.** Resuming a run treated "this fanout has recorded children" as
+        "this fanout is done" — so a run whose design had since been re-derived
+        found seven children from the previous decomposition, every one of them
+        SKIPPED, and passed on the spot. Nothing was implemented, `impl` recorded
+        PASSED with no attempts, and verification ran against a tree of stubs.
+
+        Two rules stop that. The expected children are recomputed from the source
+        every time, so a changed decomposition re-materialises. And passing needs
+        every one of them to have actually PASSED — a fanout whose children were
+        skipped has not done its work, whatever the graph shape says.
         """
-        if node.id in self._materialised:
-            execution.status = NodeStatus.PASSED
+        expected = self._children_of(session, run, node)
+        expected_ids = [child.id for child in expected]
+        recorded = list(self._extra_needs.get(node.id, ()))
+
+        if node.id in self._materialised and recorded == expected_ids:
+            outstanding = [
+                child_id
+                for child_id in expected_ids
+                if (row := store.get_node(session, run, child_id)) is None
+                or row.status is not NodeStatus.PASSED
+            ]
+            if outstanding:
+                execution.status = NodeStatus.FAILED
+                store.finish_run(
+                    session,
+                    run,
+                    status=RunStatus.FAILED,
+                    stop_reason=(
+                        f"'{node.id}' cannot pass: {len(outstanding)} of {len(expected_ids)} "
+                        f"children did not — {', '.join(outstanding[:5])}"
+                    ),
+                )
+            else:
+                execution.status = NodeStatus.PASSED
             session.flush()
             return
 
-        for child in self._children_of(session, run, node):
+        for child in expected:
             self._runtime[child.id] = child
             if store.get_node(session, run, child.id) is None:
                 store.insert_node(
                     session, run, child.id, str(child.kind), str(child.stage), _config(child)
                 )
-            self._extra_needs.setdefault(node.id, []).append(child.id)
+        # Assigned, not appended: re-materialising after a changed decomposition
+        # must drop the children that no longer exist, or the fanout waits on
+        # work nobody will do.
+        self._extra_needs[node.id] = expected_ids
         self._persist_edges(session, run, node.id)
 
         self._materialised.add(node.id)

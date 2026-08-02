@@ -15,9 +15,8 @@ from conftest import (
     FRESHNESS_SECONDS,
     MAX_INTERVALS,
     MOBILE_UA,
-    _BROWSER_KEYS,
-    _DEVICE_KEYS,
-    _REFERRER_KEYS,
+    REDIRECT_STATUS,
+    assert_error_envelope,
     read_breakdown,
     read_series,
     read_total,
@@ -40,7 +39,9 @@ def test_total_click_count_equals_number_of_redirects(
     code = create_link("https://example.com/counted")["code"]
 
     responses = click(client, code, times=7)
-    assert all(r.status_code == 301 for r in responses), "all 7 redirects must succeed"
+    assert all(r.status_code == REDIRECT_STATUS for r in responses), (
+        "all 7 redirects must succeed for the count to mean anything"
+    )
 
     body = wait_for_total(client, code, 7)
     assert read_total(body) == 7
@@ -49,18 +50,27 @@ def test_total_click_count_equals_number_of_redirects(
 def test_total_click_count_is_zero_for_a_link_with_no_clicks(
     client, create_link, analytics
 ):
-    """AC4.1 — the empty case: a link nobody visited reports zero, not 404."""
+    """AC4.1 — the empty case: a link nobody visited reports zero, not 404.
+
+    A link that exists but has no clicks is a legitimate state, and the natural
+    bug is an implementation that treats "no rows" as "no such link".
+    """
     code = create_link("https://example.com/unvisited")["code"]
 
     body = analytics(client, code)
 
     assert read_total(body) == 0, "a link with no clicks reports a total of 0"
+    assert read_series(body) is not None
+    assert sum(count for _, count in read_series(body)) == 0
+    assert read_breakdown(body, "referrers") == {}
+    assert read_breakdown(body, "devices") == {}
+    assert read_breakdown(body, "browsers") == {}
 
 
 def test_click_counts_are_scoped_to_their_own_link(
     client, create_link, click, wait_for_total
 ):
-    """AC4.1 — counts are per code (A5/E20), never pooled by long URL.
+    """AC4.1 — counts are per code (A5), never pooled by long URL.
 
     Both links point at the same target, so an implementation that keyed
     analytics on the URL instead of the code would report 5 for each.
@@ -88,7 +98,8 @@ def test_time_series_counts_cover_only_the_window_and_sum_to_its_clicks(
 
     Clicks cannot be back-dated through the public API, so this asserts the
     window semantics the criterion is really about: every interval returned
-    lies inside [start, end), and the counts add up to the clicks in it.
+    lies inside the half-open [start, end), and the counts add up to the clicks
+    in it — and to the total the same response reports.
     """
     code = create_link("https://example.com/series")["code"]
     click(client, code, times=4)
@@ -104,6 +115,10 @@ def test_time_series_counts_cover_only_the_window_and_sum_to_its_clicks(
     total_in_window = sum(count for _, count in series)
     assert total_in_window == 4, (
         f"per-interval counts sum to {total_in_window}, expected the 4 clicks in the window"
+    )
+    assert read_total(body) == total_in_window, (
+        f"the reported total {read_total(body)} disagrees with its own series "
+        f"({total_in_window}); both are scoped to the same window"
     )
 
     for interval_start, _ in series:
@@ -121,8 +136,9 @@ def test_time_series_window_excluding_clicks_sums_to_zero(
 ):
     """AC4.2 — "covering only that window" has a negative side.
 
-    A window that predates every click must report no clicks. Without this,
-    an implementation that ignores start/end entirely passes the positive case.
+    A window that predates every click must report no clicks. Without this, an
+    implementation that ignores start and end entirely passes the positive case
+    with flying colours.
     """
     code = create_link("https://example.com/outside-window")["code"]
     click(client, code, times=3)
@@ -136,6 +152,9 @@ def test_time_series_window_excluding_clicks_sums_to_zero(
     assert sum(count for _, count in series) == 0, (
         "a window before the first click must report no clicks in its intervals"
     )
+    assert read_total(body) == 0, (
+        f"the total is scoped to the window too, got {read_total(body)}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -147,7 +166,7 @@ def test_time_series_window_excluding_clicks_sums_to_zero(
     ],
 )
 def test_time_series_requires_an_explicit_window(client, create_link, params):
-    """AC4.2 — the window is required (E19), so a partial one is rejected.
+    """AC4.2 — the window is required, so a partial one is rejected.
 
     A11 bounds analytics queries so they cannot become a self-inflicted load
     source; an implicit "all time" window is exactly the unbounded scan that
@@ -164,10 +183,11 @@ def test_time_series_requires_an_explicit_window(client, create_link, params):
 
 
 def test_time_series_rejects_more_intervals_than_the_documented_cap(client, create_link):
-    """AC4.2 — more than 366 intervals is 400 (A11/E19).
+    """AC4.2 — more than 366 intervals is 400 (A11).
 
-    Both sides of the boundary are checked: the cap itself must be accepted,
-    or the bound has been implemented one interval too tight.
+    Both sides of the boundary are checked: the cap itself must be accepted, or
+    the bound has been implemented one interval too tight and a legitimate
+    year-long query fails.
     """
     code = create_link("https://example.com/too-many-intervals")["code"]
     end = datetime.now(timezone.utc)
@@ -197,6 +217,58 @@ def test_time_series_rejects_more_intervals_than_the_documented_cap(client, crea
         f"more than {MAX_INTERVALS} intervals must be rejected with 400, "
         f"got {over_cap.status_code}"
     )
+    assert_error_envelope(over_cap, "an over-cap analytics window")
+
+
+@pytest.mark.parametrize("interval", ["week", "month", "minute", "", "DAY!"])
+def test_time_series_rejects_an_unsupported_interval(client, create_link, interval):
+    """AC4.2 — the bucket widths a caller may ask for are 'hour' and 'day'.
+
+    `analytics.VALID_INTERVALS` fixes the set. An unbounded interval vocabulary
+    is the other half of A11's bound: 'second' over a year is the same scan the
+    interval cap refuses.
+    """
+    code = create_link("https://example.com/bad-interval")["code"]
+    end = datetime.now(timezone.utc)
+
+    response = client.get(
+        f"/api/links/{code}/analytics",
+        params={
+            "start": _iso(end - timedelta(days=1)),
+            "end": _iso(end),
+            "interval": interval,
+        },
+    )
+
+    assert response.status_code == 400, (
+        f"interval {interval!r} is outside the documented set and must be rejected "
+        f"with 400, got {response.status_code}: {response.text}"
+    )
+
+
+def test_time_series_rejects_an_inverted_window(client, create_link):
+    """AC4.2 — a window whose end precedes its start is not a window.
+
+    The half-open [start, end) has no meaning reversed, and the natural bug is
+    an implementation that returns an empty series instead of refusing — which
+    reports "no clicks" for a query that was never valid.
+    """
+    code = create_link("https://example.com/inverted-window")["code"]
+    now = datetime.now(timezone.utc)
+
+    response = client.get(
+        f"/api/links/{code}/analytics",
+        params={
+            "start": _iso(now),
+            "end": _iso(now - timedelta(days=1)),
+            "interval": "day",
+        },
+    )
+
+    assert response.status_code == 400, (
+        f"an inverted window must be refused with 400, got {response.status_code}: "
+        f"{response.text}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -215,7 +287,7 @@ def test_breakdown_by_referrer_groups_clicks(
     wait_for_total(client, code, 5)
 
     body = analytics(client, code)
-    referrers = read_breakdown(body, _REFERRER_KEYS, "referrer breakdown")
+    referrers = read_breakdown(body, "referrers")
 
     def count_for(needle):
         return sum(n for label, n in referrers.items() if needle in label)
@@ -232,10 +304,15 @@ def test_breakdown_by_device_and_browser_class(
 ):
     """AC4.3 — clicks are grouped by inferred device and browser class.
 
-    A desktop Chrome and a mobile Safari user-agent must land in different
-    device classes; collapsing them into one bucket is the failure this
-    catches, and it is the bucket A10 relies on to make crawler traffic
-    visible separately.
+    The criterion asks for grouping by an *inferred* class; nothing in the
+    register or the contract fixes the vocabulary of those classes, so this
+    asserts the grouping rather than the spelling. A desktop Chrome and a
+    mobile Safari user-agent must land in different buckets, and the buckets
+    must partition the clicks 3/2.
+
+    Collapsing every user-agent into one class is the failure this catches —
+    and that bucket is what A10 relies on to make crawler traffic visible
+    separately, so a single "unknown" class defeats the whole breakdown.
     """
     code = create_link("https://example.com/devices")["code"]
 
@@ -245,24 +322,54 @@ def test_breakdown_by_device_and_browser_class(
 
     body = analytics(client, code)
 
-    devices = read_breakdown(body, _DEVICE_KEYS, "device breakdown")
+    devices = read_breakdown(body, "devices")
     assert sum(devices.values()) == 5, f"device counts must cover all 5 clicks: {devices!r}"
     assert len(devices) >= 2, (
-        f"a desktop and a mobile user-agent must infer different device classes, got {devices!r}"
+        f"a desktop and a mobile user-agent must infer different device classes, "
+        f"got a single bucket: {devices!r}"
     )
-    labels = " ".join(devices).lower()
-    assert "mobile" in labels or "phone" in labels, (
-        f"the iPhone user-agent should infer a mobile device class, got {devices!r}"
-    )
-    assert "desktop" in labels, (
-        f"the macOS Chrome user-agent should infer a desktop device class, got {devices!r}"
+    assert sorted(devices.values(), reverse=True)[:2] == [3, 2], (
+        f"the two user-agent families should partition the clicks 3/2, got {devices!r}"
     )
 
-    browsers = read_breakdown(body, _BROWSER_KEYS, "browser breakdown")
+    browsers = read_breakdown(body, "browsers")
     assert sum(browsers.values()) == 5, f"browser counts must cover all 5 clicks: {browsers!r}"
-    browser_labels = " ".join(browsers).lower()
-    assert "chrome" in browser_labels, f"browser breakdown was {browsers!r}"
-    assert "safari" in browser_labels, f"browser breakdown was {browsers!r}"
+    assert len(browsers) >= 2, (
+        f"Chrome and Safari must infer different browser classes, got {browsers!r}"
+    )
+    assert sorted(browsers.values(), reverse=True)[:2] == [3, 2], (
+        f"the two browsers should partition the clicks 3/2, got {browsers!r}"
+    )
+
+
+def test_breakdowns_are_scoped_to_the_requested_window(
+    client, create_link, click, wait_for_total, analytics
+):
+    """AC4.3 — the breakdowns cover the same window as the rest of the response.
+
+    AC4.2 scopes the series and the total to [start, end); a breakdown computed
+    over all time while the total is windowed is internally inconsistent, and
+    the two would silently disagree in every report built on them.
+    """
+    code = create_link("https://example.com/windowed-breakdown")["code"]
+    click(client, code, times=2, referer="https://news.example.org/story")
+    wait_for_total(client, code, 2)
+
+    past = datetime.now(timezone.utc) - timedelta(days=9)
+    body = analytics(
+        client,
+        code,
+        start=_iso(past - timedelta(days=1)),
+        end=_iso(past),
+        interval="day",
+    )
+
+    assert read_total(body) == 0, "sanity: the window excludes every click"
+    assert sum(read_breakdown(body, "referrers").values()) == 0, (
+        "the referrer breakdown must be scoped to the window, like the total"
+    )
+    assert sum(read_breakdown(body, "devices").values()) == 0
+    assert sum(read_breakdown(body, "browsers").values()) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -273,13 +380,14 @@ def test_breakdown_by_device_and_browser_class(
 def test_click_is_visible_within_freshness_bound(client, create_link, analytics):
     """AC4.4 — a recorded click appears within the documented bound (A6: 60 s).
 
-    Recording is asynchronous by design (E10) so the redirect keeps its
-    latency budget; A6 is the price agreed for that, and 60 s is the ceiling.
-    A click that never surfaces means the drain worker is not running at all.
+    Recording is asynchronous by design so the redirect keeps its latency
+    budget; A6 is the price agreed for that, and 60 s is the ceiling. A click
+    that never surfaces means the drain worker is not running at all — the
+    failure that makes every other count in this file meaningless.
     """
     code = create_link("https://example.com/freshness")["code"]
 
-    assert client.get(f"/{code}").status_code == 301
+    assert client.get(f"/{code}").status_code == REDIRECT_STATUS
 
     deadline = time.monotonic() + FRESHNESS_SECONDS
     elapsed = None
@@ -290,8 +398,8 @@ def test_click_is_visible_within_freshness_bound(client, create_link, analytics)
         time.sleep(0.05)
 
     assert elapsed is not None, (
-        f"the click was still not visible after {FRESHNESS_SECONDS}s, "
-        f"exceeding the freshness bound documented in A6"
+        f"the click was still not visible after {FRESHNESS_SECONDS}s, exceeding the "
+        f"freshness bound documented in A6"
     )
 
 
@@ -304,10 +412,9 @@ def test_click_is_visible_within_freshness_bound(client, create_link, analytics)
 def test_analytics_for_unknown_code_returns_404_and_no_data(client, code):
     """AC4.5 — an unknown link discloses nothing.
 
-    A2 removed authentication, so E18 reduces the ownership check to an
-    existence check: 404, and no analytics body. The assertion is on the
-    disclosure, not only on the status, because a 404 carrying a click count
-    would still leak.
+    A2 removed authentication, so the ownership check reduces to an existence
+    check: 404, and no analytics body. The assertion is on the disclosure, not
+    only on the status, because a 404 carrying a click count would still leak.
     """
     response = client.get(f"/api/links/{code}/analytics")
 
@@ -315,12 +422,6 @@ def test_analytics_for_unknown_code_returns_404_and_no_data(client, code):
         f"analytics for unissued {code!r} should be 404 or 403, got {response.status_code}"
     )
 
-    try:
-        body = response.json()
-    except ValueError:
-        return  # no body at all discloses nothing
-    if isinstance(body, dict):
-        assert set(body) <= {"code", "message", "details"}, (
-            f"a refused analytics request must return only the error envelope, "
-            f"got {sorted(body)}"
-        )
+    body = assert_error_envelope(response, f"analytics for unissued {code!r}")
+    assert "total_clicks" not in body, f"a refused analytics request leaked a count: {body!r}"
+    assert "series" not in body, f"a refused analytics request leaked a series: {body!r}"

@@ -8,7 +8,15 @@ from __future__ import annotations
 import logging
 import time
 
-from conftest import AVAILABILITY_TARGET, P95_BUDGET_SECONDS, TRICKY_URL, _ip_for
+import pytest
+
+from conftest import (
+    AVAILABILITY_TARGET,
+    P95_BUDGET_SECONDS,
+    REDIRECT_STATUS,
+    TRICKY_URL,
+    _ip_for,
+)
 
 # --------------------------------------------------------------------------- #
 # AC5.1 — durability
@@ -18,11 +26,11 @@ from conftest import AVAILABILITY_TARGET, P95_BUDGET_SECONDS, TRICKY_URL, _ip_fo
 def test_created_link_survives_process_restart(client, create_link, fresh_app):
     """AC5.1 — a link that returned 201 still redirects after a restart.
 
-    The target is re-imported from scratch against the same datastore, which
-    is the closest in-process analogue of a restart: every module-level cache,
+    The target is re-imported from scratch against the same datastore, which is
+    the closest in-process analogue of a restart: every module-level cache,
     in-memory dict and connection pool is rebuilt. A link held only in process
-    memory disappears here, which is exactly what E15's "commits durably
-    before returning 201" promises it will not do.
+    memory disappears here, which is exactly what "creation persists before
+    returning 201" promises it will not do.
     """
     from fastapi.testclient import TestClient
 
@@ -36,10 +44,12 @@ def test_created_link_survives_process_restart(client, create_link, fresh_app):
     ) as after:
         response = after.get(f"/{code}")
 
-        assert response.status_code == 301, (
+        assert response.status_code == REDIRECT_STATUS, (
             f"the link did not survive a restart: {response.status_code} {response.text}"
         )
-        assert response.headers["location"] == TRICKY_URL
+        assert response.headers["location"] == TRICKY_URL, (
+            "the long URL must survive a restart byte-identically, not just in shape"
+        )
 
         metadata = after.get(f"/api/links/{code}")
         assert metadata.status_code == 200
@@ -51,20 +61,38 @@ def test_created_link_survives_process_restart(client, create_link, fresh_app):
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        pytest.param(None, id="documented-AnalyticsUnavailableError"),
+        pytest.param(
+            lambda: RuntimeError("recorder blew up in a way nobody documented"),
+            id="undocumented-RuntimeError",
+        ),
+    ],
+)
 def test_redirect_succeeds_when_analytics_recording_fails(
-    client, create_link, break_analytics_recorder
+    client, create_link, break_analytics_recorder, exc_factory
 ):
     """AC5.2 — a failing analytics path does not break or slow the redirect.
 
-    E10 and E22 both promise this: the redirect reads the link and enqueues,
-    and every non-essential dependency on that path fails open. With the
-    recorder raising on every call, the redirect must still be a correct 301
-    inside the AC2.3 latency budget.
-    """
-    code = create_link("https://example.com/fail-open")["code"]
-    assert client.get(f"/{code}").status_code == 301, "sanity: live before injection"
+    The contract promises this twice over: `record_click` never touches the
+    datastore inline, and `AnalyticsUnavailableError` "on the redirect path is
+    logged and swallowed, never returned". With the recorder raising on every
+    call, the redirect must still be a correct 301 inside the AC2.3 budget.
 
-    break_analytics_recorder()
+    Both the documented exception and an undocumented one are injected. An
+    implementation that catches only `AnalyticsUnavailableError` still turns a
+    surprise bug in the recorder into a 500 on the redirect path, which is the
+    failure this criterion exists to prevent.
+    """
+    url = "https://example.com/fail-open"
+    code = create_link(url)["code"]
+    assert client.get(f"/{code}").status_code == REDIRECT_STATUS, (
+        "sanity: the link redirects before any failure is injected"
+    )
+
+    break_analytics_recorder(exc_factory)
 
     samples = []
     for _ in range(20):
@@ -72,17 +100,18 @@ def test_redirect_succeeds_when_analytics_recording_fails(
         response = client.get(f"/{code}")
         samples.append(time.perf_counter() - start)
 
-        assert response.status_code == 301, (
+        assert response.status_code == REDIRECT_STATUS, (
             f"a failing analytics recorder broke the redirect: "
             f"{response.status_code} {response.text}"
         )
-        assert response.headers["location"] == "https://example.com/fail-open"
+        assert response.headers["location"] == url
 
     samples.sort()
     p95 = samples[int(len(samples) * 0.95)]
     assert p95 < P95_BUDGET_SECONDS, (
         f"redirects degraded to {p95 * 1000:.1f} ms p95 while analytics was failing, "
-        f"outside the AC2.3 budget — the failure is not being absorbed"
+        f"outside the AC2.3 budget — the failure is not being absorbed, it is being "
+        f"waited on"
     )
 
 
@@ -90,15 +119,16 @@ def test_analytics_failure_is_logged(client, create_link, break_analytics_record
     """AC5.2 — "and the failure is logged".
 
     Failing open silently is the dangerous half of this criterion: the service
-    looks healthy while dropping every click. E10 requires the degradation to
-    surface as a log line.
+    looks perfectly healthy while dropping every click, and nobody finds out
+    until an owner asks why their campaign shows zero traffic. The degradation
+    must surface as a log record at WARNING or above.
     """
     code = create_link("https://example.com/logged")["code"]
     break_analytics_recorder()
 
     with caplog.at_level(logging.WARNING):
         response = client.get(f"/{code}")
-        assert response.status_code == 301
+        assert response.status_code == REDIRECT_STATUS
 
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, (
@@ -112,31 +142,42 @@ def test_analytics_failure_is_logged(client, create_link, break_analytics_record
 # --------------------------------------------------------------------------- #
 
 
-def test_health_returns_200_while_dependencies_are_reachable(client):
-    """AC5.3 — healthz is 200 while the datastore serving redirects is up."""
-    response = client.get("/healthz")
+def test_health_returns_200_while_the_datastore_is_reachable(client):
+    """AC5.3 — /health is 200 while the datastore serving redirects is up.
+
+    The body is main.HealthResponse: a verdict and the datastore reachability
+    it rests on, which is `storage.ping()`.
+    """
+    response = client.get("/health")
 
     assert response.status_code == 200, (
         f"health should be 200 with a working datastore, got "
         f"{response.status_code}: {response.text}"
     )
+    body = response.json()
+    assert body["datastore"] is True, (
+        f"health must report the dependency its verdict rests on, got {body!r}"
+    )
+    assert isinstance(body["status"], str) and body["status"], (
+        f"health must report a status, got {body!r}"
+    )
 
 
-def test_health_stays_200_when_only_analytics_is_degraded(
-    client, break_analytics_recorder
-):
+def test_health_stays_200_when_only_analytics_is_degraded(client, break_analytics_recorder):
     """AC5.3 — health tracks redirect-critical dependencies only.
 
-    E12 is explicit that analytics-writer health is reported but does not fail
-    the check. A health endpoint that goes red here would take a still-serving
-    instance out of the load balancer over a degraded side path.
+    The design is explicit that health reports what redirects need and
+    deliberately not the analytics recorder, because AC5.2 makes a failing
+    recorder a *healthy* state for this service. A health endpoint that went
+    red here would pull a still-serving instance out of the load balancer over
+    a side path that is designed to fail open.
     """
     break_analytics_recorder()
 
-    response = client.get("/healthz")
+    response = client.get("/health")
 
     assert response.status_code == 200, (
-        f"a degraded analytics writer must not fail the health check (E12), got "
+        f"a degraded analytics writer must not fail the health check, got "
         f"{response.status_code}: {response.text}"
     )
 
@@ -147,13 +188,13 @@ def test_health_returns_non_2xx_when_the_datastore_is_unreachable(
     """AC5.3 — "and a non-2xx status otherwise".
 
     The datastore is required to serve redirects, so when its reachability
-    check fails the endpoint must report unhealthy. An endpoint hard-coded to
-    `return {"status": "ok"}` passes the positive case and fails here, which
-    is the only reason the positive case is worth anything.
+    probe reports false the endpoint must report unhealthy. An endpoint
+    hard-coded to `return {"status": "ok"}` passes the positive case and fails
+    here — which is the only reason the positive case is worth anything.
     """
     break_datastore_ping()
 
-    response = client.get("/healthz")
+    response = client.get("/health")
 
     assert not (200 <= response.status_code < 300), (
         f"health returned {response.status_code} while the datastore was "
@@ -165,6 +206,8 @@ def test_health_returns_non_2xx_when_the_datastore_is_unreachable(
 # AC5.4 — rate limiting
 # --------------------------------------------------------------------------- #
 
+# Far above any limit sane for a service peaking at 100 rps (A3); the default
+# in the contract's Settings is 120 requests per 60 s.
 _BURST_CEILING = 1000
 
 
@@ -173,16 +216,17 @@ def test_client_exceeding_rate_limit_gets_429_with_retry_after(
 ):
     """AC5.4 — an over-limit client gets 429 with a Retry-After header.
 
-    The documented rate is the implementation's to choose (E13 fixes the
-    mechanism, not the number), so this drives one IP hard enough that any
-    limit sane for a service peaking at 100 rps (A3) must engage, and asserts
-    the shape of the response when it does.
+    The exact budget is configuration (`Settings.rate_limit_requests`), not a
+    criterion, so this drives one IP hard enough that any sane limit must
+    engage, and asserts the shape of the response when it does. `Retry-After`
+    is the part a client actually needs: a 429 without it tells the caller to
+    back off for an unknown length of time.
     """
     code = create_link("https://example.com/rate-limited")["code"]
     noisy = make_client(1)
 
     limited = None
-    for i in range(_BURST_CEILING):
+    for _ in range(_BURST_CEILING):
         response = noisy.get(f"/{code}")
         if response.status_code == 429:
             limited = response
@@ -190,14 +234,17 @@ def test_client_exceeding_rate_limit_gets_429_with_retry_after(
 
     assert limited is not None, (
         f"{_BURST_CEILING} back-to-back requests from a single client IP were never "
-        f"rate limited; E13 requires a documented per-client limit"
+        f"rate limited; AC5.4 requires a documented per-client limit"
     )
 
-    retry_after = limited.headers.get("Retry-After") or limited.headers.get("retry-after")
+    retry_after = limited.headers.get("Retry-After")
     assert retry_after is not None, (
         f"a 429 must carry Retry-After, got headers {dict(limited.headers)!r}"
     )
     assert retry_after.strip(), "Retry-After must not be empty"
+    assert float(retry_after) > 0, (
+        f"Retry-After must be a positive number of seconds, got {retry_after!r}"
+    )
 
 
 def test_rate_limited_client_does_not_affect_other_clients(
@@ -205,8 +252,9 @@ def test_rate_limited_client_does_not_affect_other_clients(
 ):
     """AC5.4 — "and other clients' requests are unaffected".
 
-    Buckets are per key (E13), so one noisy IP must not deny service to
-    anyone else. A single global counter passes the test above and fails here.
+    Buckets are per key (the ratelimit module keys on client IP), so one noisy
+    IP must not deny service to anyone else. A single global counter passes the
+    test above and fails here, which is why both exist.
     """
     code = create_link("https://example.com/isolated")["code"]
     noisy = make_client(2)
@@ -225,7 +273,7 @@ def test_rate_limited_client_does_not_affect_other_clients(
 
     for attempt in range(5):
         response = innocent.get(f"/{code}")
-        assert response.status_code == 301, (
+        assert response.status_code == REDIRECT_STATUS, (
             f"request {attempt} from an unrelated client IP was refused with "
             f"{response.status_code}; rate-limit buckets are not isolated per client"
         )
@@ -244,13 +292,13 @@ def test_sustained_redirect_load_meets_availability_target(
     Scaled proxy, stated plainly: this is a bounded in-process run, not the
     10-minute soak the criterion describes, and it cannot certify 99.9% over
     that window. A real soak belongs in a load harness against a deployed
-    instance and is a documented limitation of this suite.
+    instance, and its absence is a documented limitation of this suite.
 
     What it does catch is the failure mode a soak is actually run to find:
     degradation that accumulates. Comparing the first half against the second
-    half surfaces a leaking connection pool, an unbounded in-memory queue or a
-    rate-limit bucket that never refills — each of which is green on request
-    one and red by request six hundred.
+    surfaces a leaking connection pool, an analytics queue that fills and never
+    drains, or a rate-limit bucket that never refills — each of which is green
+    on request one and red by request six hundred.
     """
     code = create_link("https://example.com/soak")["code"]
 
@@ -265,7 +313,7 @@ def test_sustained_redirect_load_meets_availability_target(
         start = time.perf_counter()
         response = pool_client.get(f"/{code}")
         latencies.append(time.perf_counter() - start)
-        outcomes.append(response.status_code == 301)
+        outcomes.append(response.status_code == REDIRECT_STATUS)
 
     success_rate = sum(outcomes) / len(outcomes)
     assert success_rate >= AVAILABILITY_TARGET, (
