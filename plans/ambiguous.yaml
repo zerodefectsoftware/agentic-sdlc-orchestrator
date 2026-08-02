@@ -41,7 +41,7 @@ override:
       all:
         - predicate: schema_valid
         - predicate: every_requirement_has_testable_ac
-        - "ambiguities.total > 0"       # see below
+        - predicate: requirement_is_ambiguous   # see below
 
   # A lower threshold, stated in data. MEDIUM and above now reach a person,
   # where greenfield escalates only HIGH. The knob that decides how much

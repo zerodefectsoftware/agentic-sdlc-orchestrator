@@ -125,6 +125,27 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
         return True, f"all {len(register.requirements)} requirements have testable criteria"
 
     @reg.register(
+        "requirement_is_ambiguous",
+        "intake found at least one thing the requirement does not say",
+    )
+    def requirement_is_ambiguous(context: PredicateContext) -> tuple[bool, str]:
+        """The ambiguous scenario's own gate: an intake that found nothing has not read it.
+
+        A predicate rather than `ambiguities.total > 0`, because nothing produces
+        that fact — and nothing should. The count is a property of the artifact,
+        and the only thing that could report it as a fact is the agent that wrote
+        it, whose word about its own output is inadmissible (D4). The artifact is
+        the subject of the check, never its author.
+        """
+        register = _load(context, "intake.register", RequirementRegister)
+        if not register.ambiguities:
+            return False, (
+                "intake surfaced no ambiguities from a requirement chosen for being "
+                "vague — the work here is noticing what it does not say"
+            )
+        return True, f"{len(register.ambiguities)} ambiguities surfaced"
+
+    @reg.register(
         "no_ambiguity_without_disposition",
         "every ambiguity is resolved or carries a recorded assumption",
     )
