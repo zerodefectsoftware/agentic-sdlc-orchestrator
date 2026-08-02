@@ -23,7 +23,7 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import ColumnElement, Connection, and_, func, select
 
@@ -341,8 +341,8 @@ def _utc(moment: datetime) -> datetime:
     UTC is what the recorder writes.
     """
     if moment.tzinfo is None:
-        return moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def _device_class(user_agent: str | None) -> str:

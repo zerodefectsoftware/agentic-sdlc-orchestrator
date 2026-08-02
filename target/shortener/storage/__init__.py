@@ -22,7 +22,7 @@ import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Column,
@@ -120,14 +120,14 @@ def _to_storage(moment: datetime | None) -> datetime | None:
         return None
     if moment.tzinfo is None:
         return moment
-    return moment.astimezone(timezone.utc).replace(tzinfo=None)
+    return moment.astimezone(UTC).replace(tzinfo=None)
 
 
 def _from_storage(moment: datetime | None) -> datetime | None:
     """The stored form read back as an aware UTC instant."""
     if moment is None:
         return None
-    return moment.replace(tzinfo=timezone.utc)
+    return moment.replace(tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- #

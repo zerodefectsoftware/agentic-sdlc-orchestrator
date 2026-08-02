@@ -23,7 +23,7 @@ put the analytics store on the creation path AC5.2 works to keep it off.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 from shortener.codes import generate_code
@@ -66,7 +66,7 @@ def create_link(long_url: str, expires_at: datetime | None = None) -> Link:
     """Validate, mint a code, persist, and return the new link."""
     _validate_url(long_url)
 
-    created_at = datetime.now(timezone.utc)
+    created_at = datetime.now(UTC)
     expiry = None if expires_at is None else _as_utc(expires_at)
 
     for _ in range(_MINT_ATTEMPTS):
@@ -100,7 +100,7 @@ def resolve_link(code: str) -> Link:
             "this short link has been deleted",
             details={"code": code},
         )
-    if link.expires_at is not None and link.expires_at <= datetime.now(timezone.utc):
+    if link.expires_at is not None and link.expires_at <= datetime.now(UTC):
         raise LinkGoneError(
             "this short link has expired",
             details={"code": code, "expires_at": link.expires_at.isoformat()},
@@ -132,7 +132,7 @@ def delete_link(code: str) -> None:
 
     # Whether this call was the one that retired the code is not interesting to
     # the caller: never-issued is the only 404, and a retried DELETE is a 204.
-    mark_link_deleted(code, datetime.now(timezone.utc))
+    mark_link_deleted(code, datetime.now(UTC))
 
 
 def _validate_url(long_url: str) -> None:
@@ -189,5 +189,5 @@ def _as_utc(moment: datetime) -> datetime:
     path, where a naive-versus-aware mismatch would be a 500 rather than a 301.
     """
     if moment.tzinfo is None:
-        return moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)

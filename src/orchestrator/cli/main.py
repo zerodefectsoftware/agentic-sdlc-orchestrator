@@ -768,8 +768,11 @@ def watch(
     seen_status: dict[str, str] = {}
     seen_gates: set[str] = set()
     seen_artifacts: set[str] = set()
+    started = time.monotonic()
+    last_event = started
 
     console.print("[dim]watching — Ctrl-C to stop[/dim]\n")
+    first = True
     while True:
         with store.Store().session() as session:
             run = _resolve(session, run_id)
@@ -779,10 +782,16 @@ def watch(
                 status = str(execution.status)
                 if seen_status.get(execution.node_id) == status:
                     continue
+                style = STATUS_STYLE.get(status, "white")
                 if execution.node_id in seen_status:
-                    style = STATUS_STYLE.get(status, "white")
+                    console.print(f"  [{style}]{status:<8}[/{style}] {execution.node_id}")
+                    last_event = time.monotonic()
+                elif first and execution.status is not NodeStatus.PENDING:
+                    # Where things stand when you attach. Without it a watcher
+                    # started mid-run seeds silently and then says nothing for as
+                    # long as the current wave takes — which reads as broken.
                     console.print(
-                        f"  [{style}]{status:<8}[/{style}] {execution.node_id}"
+                        f"  [dim]{status:<8} {execution.node_id} (already)[/dim]"
                     )
                 seen_status[execution.node_id] = status
 
@@ -829,6 +838,23 @@ def watch(
             if until_done and run.status is not RunStatus.RUNNING:
                 return
 
+            # A long wave is silence, and silence is indistinguishable from a
+            # hung watcher. Say what is still out, and for how long.
+            if run.status is RunStatus.RUNNING and time.monotonic() - last_event > 30:
+                busy = sorted(
+                    n.node_id
+                    for n in store.all_nodes(session, run)
+                    if n.status is NodeStatus.RUNNING
+                )
+                elapsed = int(time.monotonic() - started)
+                console.print(
+                    f"  [dim]· {elapsed // 60}m{elapsed % 60:02d}s — "
+                    + (f"{len(busy)} running: {', '.join(busy)}" if busy else "idle")
+                    + "[/dim]"
+                )
+                last_event = time.monotonic()
+
+        first = False
         time.sleep(interval)
 
 
