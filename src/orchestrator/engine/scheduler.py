@@ -132,6 +132,16 @@ class Scheduler:
         Returns rather than waiting. A blocked run persists and the process can
         exit; `orchestrator approve` resumes it (§6).
         """
+        # A node marked RUNNING by a process that is no longer here did not
+        # finish. Nothing recorded an outcome for it, and RUNNING is not
+        # collectable — so a killed or crashed run left its wave wedged forever,
+        # which is the bill for making progress visible at all. Durable
+        # execution would supply this; hand-rolling the runtime means owning it
+        # (D1).
+        for execution in store.all_nodes(session, run):
+            if execution.status is NodeStatus.RUNNING:
+                execution.status = NodeStatus.PENDING
+
         # Staleness is a property of state, not an event. Reconciling only when
         # an artifact is re-derived misses every approval that went stale in a
         # previous process — including one that went stale before the reconciler
@@ -232,7 +242,7 @@ class Scheduler:
                 if decision:
                     material[f"{upstream.id}.decision"] = decision
 
-        verdict = _last_failure(store.get_node(session, run, node.id))
+        verdict = _last_failure(session, store.get_node(session, run, node.id))
         if verdict:
             material["previous_attempt"] = verdict
         return material
@@ -985,7 +995,7 @@ def _answerable(check: GateCheck, facts: FactSet) -> bool:
     return path in facts
 
 
-def _last_failure(execution) -> str | None:
+def _last_failure(session: Session, execution) -> str | None:
     """Why this node's previous attempt was rejected, as material for the next.
 
     A bounded retry is only worth having if the retry knows something the first
@@ -999,6 +1009,10 @@ def _last_failure(execution) -> str | None:
     """
     if execution is None:
         return None
+    # Refreshed, not walked: a wave commits, and with `expire_on_commit=False`
+    # an already-loaded `attempts` collection does not see the attempt the last
+    # wave just added — so a retry was handed nothing and repeated itself.
+    session.refresh(execution)
     record = _latest_gate(execution)
     if record is None or record.verdict == "pass":
         return None

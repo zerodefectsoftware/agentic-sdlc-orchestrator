@@ -1175,3 +1175,26 @@ def test_a_run_with_nothing_to_do_and_nobody_to_ask_still_fails(session, tmp_pat
 
     scheduler.advance(session, run)
     assert run.status is RunStatus.FAILED
+
+
+def test_a_node_left_running_by_a_dead_process_runs_again(session, tmp_path):
+    """Marking a node RUNNING is what makes a run watchable, and it is also a
+    state nothing clears when the process is killed mid-wave.
+
+    RUNNING is not collectable, so the node was wedged forever and the run could
+    never advance past it. Durable execution would supply this; hand-rolling the
+    runtime means owning it (D1).
+    """
+    worker = StubWorker(
+        {"build": scripts.passing("make"), "verify": scripts.passing("pytest")}
+    )
+    scheduler, run = run_plan(session, plan_from(tmp_path, LINEAR), worker)
+
+    store.get_node(session, run, "verify").status = NodeStatus.RUNNING   # killed here
+    run.status = RunStatus.RUNNING
+    session.flush()
+
+    scheduler.advance(session, run)
+
+    assert statuses(session, run)["verify"] is NodeStatus.PASSED
+    assert run.status is RunStatus.COMPLETED
