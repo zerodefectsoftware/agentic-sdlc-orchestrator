@@ -264,6 +264,17 @@ nodes:
     inputs: [design.artifacts.spec, intake.artifacts.register]
     effort: medium
     write_scope: ["target/README.md", "target/docs/**"]
+    params:
+      root: "{target.root}"
+      readme: target/README.md
+      setup_timeout_s: 900
+    verify:
+      # The gate asks for a recorded exit code from running the documented
+      # steps. Nothing produced one, so the check could never hold — and because
+      # the predicate returned False rather than raising, it read as FAIL and
+      # burned the retry budget on a README that was fine. This is what makes
+      # "executable documentation" mean the documentation was executed.
+      - py:orchestrator.gates.execute_setup_steps
     gate:                             # G8 — executable documentation
       all:
         - "session.files_written > 0"

@@ -28,6 +28,7 @@ from orchestrator.derive import verify_target_matches_contract
 from orchestrator.derive.scaffold import ContractError
 from orchestrator.engine.plan import Node
 from orchestrator.gates.checks import (
+    execute_setup_steps,
     imports_resolve,
     report_coverage,
     stubs_are_unimplemented,
@@ -507,3 +508,62 @@ def test_an_unreadable_coverage_report_errors(tmp_path):
 
     with pytest.raises(WorkerError, match="not readable"):
         report_coverage(check_task(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# executable documentation (G8)
+# --------------------------------------------------------------------------- #
+
+
+def setup_task(tmp_path, readme: str) -> Task:
+    (tmp_path / "target").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "target" / "README.md").write_text(readme)
+    (tmp_path / "target" / "shortener").mkdir(parents=True, exist_ok=True)
+    return Task(
+        node=node(
+            run="py:orchestrator.gates.execute_setup_steps",
+            params={
+                "root": "target/shortener",
+                "readme": "target/README.md",
+                "setup_timeout_s": 60,
+            },
+        ),
+        inputs={},
+        scope=WorkScope(),
+        cwd=tmp_path,
+    )
+
+
+def test_documented_steps_that_work_are_recorded_as_working(tmp_path):
+    readme = "# t\n\n## Setup\n\n```bash\ntrue\n```\n"
+    output = execute_setup_steps(setup_task(tmp_path, readme))
+    assert output.facts["setup.exit_code"] == 0
+
+
+def test_documented_steps_that_do_not_work_fail_the_gate(tmp_path):
+    """The point of the check: the doc and the thing it describes drift."""
+    readme = "# t\n\n## Setup\n\n```bash\nexit 3\n```\n"
+    output = execute_setup_steps(setup_task(tmp_path, readme))
+    assert output.facts["setup.exit_code"] == 3
+
+
+def test_the_steps_run_somewhere_the_repository_cannot_help_them(tmp_path):
+    """A venv the repository already has must not make broken steps look fine."""
+    readme = "# t\n\n## Setup\n\n```bash\ntest ! -e .venv\n```\n"
+    (tmp_path / ".venv").mkdir()
+    assert execute_setup_steps(setup_task(tmp_path, readme)).facts["setup.exit_code"] == 0
+
+
+def test_documentation_with_no_runnable_steps_does_not_pass(tmp_path):
+    readme = "# t\n\n## Setup\n\nRun the usual thing.\n"
+    output = execute_setup_steps(setup_task(tmp_path, readme))
+    assert output.facts["setup.exit_code"] == 1
+    assert "no runnable setup block" in output.facts["setup.detail"]
+
+
+def test_missing_documentation_is_an_error_not_a_failing_doc(tmp_path):
+    """"The steps are wrong" and "we could not try them" are different findings."""
+    task = setup_task(tmp_path, "# t\n")
+    (tmp_path / "target" / "README.md").unlink()
+    with pytest.raises(WorkerError, match="no documentation"):
+        execute_setup_steps(task)

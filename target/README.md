@@ -42,6 +42,10 @@ the tests start their own app against their own temporary database):
 .venv/bin/pytest target/tests
 ```
 
+These commands were last run end to end in an empty virtual environment on
+Python 3.13 with nothing preinstalled: the service started, `/health` returned
+`{"status":"ok","datastore":true}`, and the suite reported 86 passed.
+
 ### Configuration
 
 Every setting is read from an environment variable with the `SHORTENER_` prefix.
@@ -62,6 +66,26 @@ If you change `SHORTENER_BASE_URL`, short URLs in responses change with it; the
 stored long URLs do not.
 
 ## API
+
+The service exposes exactly six endpoints:
+
+```
+POST /api/links
+GET /api/links/{code}
+DELETE /api/links/{code}
+GET /api/links/{code}/analytics
+GET /health
+GET /{code}
+```
+
+| Endpoint | Success | Purpose |
+| --- | --- | --- |
+| `POST /api/links` | 201 | Create a short link |
+| `GET /api/links/{code}` | 200 | Link metadata and total clicks |
+| `DELETE /api/links/{code}` | 204 | Retire a code |
+| `GET /api/links/{code}/analytics` | 200 | Clicks over a window, with breakdowns |
+| `GET /health` | 200 | Datastore reachability |
+| `GET /{code}` | 301 | The redirect path |
 
 All request and response bodies are JSON. All timestamps are ISO 8601 with a UTC
 offset.
@@ -203,6 +227,7 @@ Every non-2xx response uses one envelope, so a client parses one shape:
 | `code` | HTTP | Cause |
 | --- | --- | --- |
 | `invalid_url` | 400 | Missing, relative, non-http(s), or self-referential URL |
+| `invalid_request` | 400 | The request body or query failed schema validation |
 | `invalid_query` | 400 | An analytics window or interval the API refuses to serve |
 | `not_found` | 404 | The short code was never issued |
 | `gone` | 410 | The code was issued and is deleted or expired |

@@ -13,6 +13,7 @@ opinion of it.
 """
 
 from orchestrator.gates.checks import (
+    execute_setup_steps,
     imports_resolve,
     report_coverage,
     stubs_are_unimplemented,
@@ -38,6 +39,7 @@ __all__ = [
     "UnknownPredicate",
     "Verdict",
     "evaluate_gate",
+    "execute_setup_steps",
     "imports_resolve",
     "report_coverage",
     "registry",

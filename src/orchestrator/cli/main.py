@@ -98,6 +98,46 @@ def _registry() -> PredicateRegistry:
     return register_all(PredicateRegistry())
 
 
+def _decide_here(session, run: Run, pending: list, by: str | None) -> None:
+    """Answer a checkpoint from the terminal that is already watching the run.
+
+    `watch` can only tell you a decision is needed; answering it meant switching
+    terminals, finding the run id, and typing a command — which makes a human
+    checkpoint feel like the run died rather than like it asked you something.
+
+    Deliberately additive: the run is still stopped and persisted before this
+    prompt appears (§stop, don't wait), and every decision goes through the same
+    recorded path as `approve`. Nothing here is a shortcut around governance —
+    it is the same question, asked where you are standing.
+    """
+    if not by:
+        console.print("[red]--decide needs --by: a decision with no decider is not a record[/red]")
+        raise typer.Exit(1)
+
+    for approval in pending:
+        console.print(f"\n[bold cyan]decision needed[/bold cyan] on {approval.node_id}")
+        for binding in approval.bindings:
+            console.print(f"  covers [bold]{binding.artifact.ref}[/bold]")
+
+        answer = typer.prompt("  [a]pprove / [r]eject / [s]kip", default="s").strip().lower()
+        if answer.startswith("s"):
+            console.print("[dim]  left open — the run stays blocked[/dim]")
+            continue
+
+        note = typer.prompt("  note", default="")
+        recorder.decide(
+            session,
+            approval,
+            decision=Decision.APPROVED if answer.startswith("a") else Decision.REJECTED,
+            decided_by=by,
+            note=note or None,
+        )
+        console.print(f"[green]  recorded[/green] by {by}")
+
+    session.commit()
+    console.print("\n[dim]resume with: orchestrator resume " + run.id + "[/dim]")
+
+
 def _doing(session, run: Run) -> str:
     """What a run is actually doing, for the heartbeat.
 
@@ -789,6 +829,11 @@ def watch(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Every check, not just the ones that blocked")
     ] = False,
+    decide: Annotated[
+        bool,
+        typer.Option("--decide", help="Answer checkpoints here, and continue the run"),
+    ] = False,
+    by: Annotated[str | None, typer.Option(help="Who is deciding — required with --decide")] = None,
 ) -> None:
     """Follow a run as it executes. Open this in a second terminal.
 
@@ -901,6 +946,13 @@ def watch(
                     continue
                 seen_artifacts.add(key)
                 console.print(f"  [cyan]awaiting[/cyan] {approval.node_id}")
+                for binding in approval.bindings:
+                    console.print(f"    [dim]covers {binding.artifact.ref}[/dim]")
+
+            if decide and run.status is RunStatus.BLOCKED:
+                pending = [a for a in run.approvals if a.decision is Decision.PENDING]
+                if pending:
+                    return _decide_here(session, run, pending, by)
 
             status = str(run.status)
             if seen_status.get("<run>") != status:

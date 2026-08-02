@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import ast
 import json
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from orchestrator.workers.base import WorkerError
@@ -161,6 +164,77 @@ def _is_ellipsis(stmt: ast.stmt) -> bool:
         and isinstance(stmt.value, ast.Constant)
         and stmt.value.value is Ellipsis
     )
+
+
+@Task.needs_params("readme")
+def execute_setup_steps(task: Task) -> TaskOutput:
+    """Run the setup block the documentation tells a newcomer to run.
+
+    A documentation gate that checks for headings is vacuous, and one that trusts
+    the author to say the steps work is worse — the doc and the thing it
+    describes drift, and nobody notices until somebody follows it. So the gate
+    asks for a recorded exit code, and this is what records it.
+
+    The steps run in a **fresh temporary directory** with the target copied in,
+    so a `venv` the repository already has cannot make broken instructions look
+    fine. Only the first bash block under `## Setup` is executed: it is the one a
+    reader runs before anything else works, and running the whole document would
+    start a server and block.
+
+    A harness failure — no shell, no interpreter, no network — raises rather than
+    recording a non-zero exit. "The steps are wrong" and "we could not try them"
+    are different findings, and only the first is about the documentation (§ERROR
+    is not FAIL).
+    """
+    readme = task.cwd / Path(task.param("readme"))
+    if not readme.exists():
+        raise WorkerError(f"no documentation at {readme} to execute")
+
+    block = _first_setup_block(readme.read_text())
+    if not block:
+        return TaskOutput(
+            facts={
+                "setup.exit_code": 1,
+                "setup.detail": f"{readme.name} has no runnable setup block",
+            }
+        )
+
+    root = Path(task.param("root"))
+    with tempfile.TemporaryDirectory() as scratch:
+        sandbox = Path(scratch)
+        shutil.copytree(task.cwd / root, sandbox / root, dirs_exist_ok=True)
+        try:
+            completed = subprocess.run(  # noqa: S602 — the doc's own steps, sandboxed
+                block,
+                shell=True,
+                cwd=sandbox,
+                capture_output=True,
+                text=True,
+                timeout=int(task.params.get("setup_timeout_s", 600)),
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise WorkerError(f"cannot execute the documented steps: {exc}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise WorkerError(
+                f"the documented setup steps did not finish within {exc.timeout}s"
+            ) from exc
+
+    return TaskOutput(
+        facts={
+            "setup.exit_code": completed.returncode,
+            "setup.detail": (completed.stderr or completed.stdout).strip()[-400:],
+        }
+    )
+
+
+def _first_setup_block(markdown: str) -> str | None:
+    """The first fenced bash block after a `## Setup` heading."""
+    match = re.search(r"^##+\s+Setup\s*$", markdown, re.M | re.I)
+    if not match:
+        return None
+    fence = re.search(r"```(?:bash|sh|shell)\n(.*?)```", markdown[match.end():], re.S)
+    return fence.group(1) if fence else None
 
 
 def report_coverage(task: Task) -> TaskOutput:
