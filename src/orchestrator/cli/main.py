@@ -98,7 +98,7 @@ def _registry() -> PredicateRegistry:
     return register_all(PredicateRegistry())
 
 
-def _decide_here(session, run: Run, pending: list, by: str | None) -> None:
+def _ask_here(pending: list, by: str | None) -> list[tuple[str, Decision, str | None]]:
     """Answer a checkpoint from the terminal that is already watching the run.
 
     `watch` can only tell you a decision is needed; answering it meant switching
@@ -114,6 +114,7 @@ def _decide_here(session, run: Run, pending: list, by: str | None) -> None:
         console.print("[red]--decide needs --by: a decision with no decider is not a record[/red]")
         raise typer.Exit(1)
 
+    answers: list[tuple[str, Decision, str | None]] = []
     for approval in pending:
         console.print(f"\n[bold cyan]decision needed[/bold cyan] on {approval.node_id}")
         for binding in approval.bindings:
@@ -125,17 +126,15 @@ def _decide_here(session, run: Run, pending: list, by: str | None) -> None:
             continue
 
         note = typer.prompt("  note", default="")
-        recorder.decide(
-            session,
-            approval,
-            decision=Decision.APPROVED if answer.startswith("a") else Decision.REJECTED,
-            decided_by=by,
-            note=note or None,
+        answers.append(
+            (
+                approval.node_id,
+                Decision.APPROVED if answer.startswith("a") else Decision.REJECTED,
+                note or None,
+            )
         )
-        console.print(f"[green]  recorded[/green] by {by}")
 
-    session.commit()
-    console.print("\n[dim]resume with: orchestrator resume " + run.id + "[/dim]")
+    return answers
 
 
 def _doing(session, run: Run) -> str:
@@ -952,7 +951,9 @@ def watch(
             if decide and run.status is RunStatus.BLOCKED:
                 pending = [a for a in run.approvals if a.decision is Decision.PENDING]
                 if pending:
-                    return _decide_here(session, run, pending, by)
+                    answers = _ask_here(pending, by)
+                    target = run.id
+                    break
 
             status = str(run.status)
             if seen_status.get("<run>") != status:
@@ -976,6 +977,14 @@ def watch(
 
         first = False
         time.sleep(interval)
+    else:                                  # pragma: no cover — the loop is infinite
+        return
+
+    # Applied outside the read session, through exactly the path `approve` uses:
+    # recording a decision is only half of it — the checkpoint has to pass, its
+    # escalation has to be released, and the run has to continue.
+    for node_id, decision, note in answers:
+        _decide(target, node_id, decision, by, note, resume=True)
 
 
 @app.command()
