@@ -6,6 +6,11 @@ URL shortener service.
 **Status:** Design. Implementation in progress. This document is the authoritative
 description of the orchestrator's architecture and the registry for decisions D1–D15.
 
+**If you are reading about this system for the first time, start with
+[`orchestrator-design.md`](orchestrator-design.md)** — it explains how the components
+interact and how data moves between them, with diagrams. This document is the *why*: the
+reasoning behind each choice, the cost accepted, and the decision registry.
+
 ---
 
 ## 1. What this system is

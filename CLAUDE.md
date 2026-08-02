@@ -29,6 +29,8 @@ that no longer exists (D23: greenfield uses a single implementer, brownfield kee
 fan-out).
 
 `docs/observing-a-run.md` says where every node's output lands and what to read at each step.
+`docs/orchestrator-design.md` explains how the components interact and how data moves —
+read it before the architecture doc if the runtime is unfamiliar.
 
 **Known gaps, in the order they will bite:**
 
