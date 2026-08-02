@@ -14,9 +14,12 @@ hours is not a checkpoint.
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import signal
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -298,7 +301,11 @@ def _report(session, run: Run) -> None:
     """Print where a run stands, and what to do next."""
     colour = {"completed": "green", "blocked": "cyan"}.get(str(run.status), "yellow")
     console.print(f"\n[bold]{run.plan_name}[/bold] · run [dim]{run.id}[/dim]")
-    console.print(f"status: [{colour}]{run.status}[/{colour}]")
+    holder = _held_by(run.id)
+    held = f"  [yellow]· driven by pid {holder}[/yellow]" if holder else ""
+    console.print(f"status: [{colour}]{run.status}[/{colour}]{held}")
+    if holder:
+        console.print(f"  [dim]orchestrator stop {run.id} --by <you> --force[/dim]")
     if run.stop_reason:
         console.print(f"[dim]{run.stop_reason}[/dim]")
 
@@ -1059,6 +1066,59 @@ def watch(
 
 
 @app.command()
+def stop(
+    run_id: Annotated[str, typer.Argument()],
+    by: Annotated[str, typer.Option(help="Who is stopping it — recorded in the audit trail")],
+    force: Annotated[
+        bool, typer.Option("--force", help="Kill the driving process, not just the next wave")
+    ] = False,
+) -> None:
+    """Abort a run: stop the next wave, and optionally kill what is running now.
+
+    `safe_stop` is a *policy* response to a gate verdict — it halts before the
+    next wave and there is no way to ask for it. This is the operator's version
+    of the same thing, plus the part that was missing entirely: a wave here can
+    be eight code agents running for twenty minutes, and until now the only way
+    to end one was to find the process yourself and `pkill` it, which left every
+    node it had marked RUNNING stuck that way forever.
+
+    Without `--force` this is cooperative: the run is marked stopped, so nothing
+    further starts, and work already dispatched finishes and is recorded. With
+    `--force` the driving process is killed first — in-flight sessions are lost,
+    whatever they had written stays written, and the nodes they were running are
+    returned to pending so a later resume redoes them.
+    """
+    with store.Store().session() as session:
+        target = _resolve(session, run_id)
+        pid = _held_by(target.id)
+
+        if pid is not None and force:
+            os.kill(pid, signal.SIGTERM)
+            console.print(f"[yellow]killed[/yellow] pid {pid} — in-flight work is lost")
+            _holder(target.id).unlink(missing_ok=True)
+        elif pid is not None:
+            console.print(
+                f"[yellow]pid {pid} is still running[/yellow] — the current wave will finish "
+                f"and be recorded.\n[dim]use --force to end it now[/dim]"
+            )
+
+        # Whatever was mid-flight did not finish, so it has to run again. Leaving
+        # it RUNNING is what wedged killed runs before: RUNNING is not
+        # collectable, so the node could never be reached again.
+        reset = [n for n in store.all_nodes(session, target) if n.status is NodeStatus.RUNNING]
+        for node in reset:
+            node.status = NodeStatus.PENDING
+        if reset:
+            console.print(f"[dim]returned to pending: {', '.join(n.node_id for n in reset)}[/dim]")
+
+        store.finish_run(
+            session, target, status=RunStatus.STOPPED, stop_reason=f"stopped by {by}"
+        )
+
+    console.print(f"[bold]stopped[/bold] {target.id} — resume when you are ready")
+
+
+@app.command()
 def recheck(
     run_id: Annotated[str, typer.Argument()],
     node: Annotated[str, typer.Argument(help="The errored or failed node to re-check")],
@@ -1119,6 +1179,41 @@ def recheck(
     _show(resolved)
 
 
+def _holder(run_id: str) -> Path:
+    """Where a run records the process currently driving it.
+
+    A file rather than a column: it must be readable by a second terminal while
+    the first holds a write transaction, and it must be obviously stale when the
+    process that wrote it is gone.
+    """
+    return get_settings().runs_dir / run_id / "held-by.pid"
+
+
+def _held_by(run_id: str) -> int | None:
+    """The live process driving this run, if there is one."""
+    path = _holder(run_id)
+    if not path.exists():
+        return None
+    try:
+        pid = int(path.read_text().strip())
+        os.kill(pid, 0)          # signal 0 asks "is it there?" and changes nothing
+    except (ValueError, OSError):
+        return None
+    return pid
+
+
+@contextmanager
+def _holding(run_id: str):
+    """Claim a run for this process, and release it however we leave."""
+    path = _holder(run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(os.getpid()))
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def _advance(run_id: str | None) -> None:
     with store.Store().session() as session:
         target = _resolve(session, run_id)
@@ -1134,7 +1229,17 @@ def _advance(run_id: str | None) -> None:
         if target.status is not RunStatus.RUNNING:
             target.status = RunStatus.RUNNING
             session.flush()
-        run_id = scheduler.advance(session, target).id
+
+        holder = _held_by(target.id)
+        if holder is not None:
+            console.print(
+                f"[red]run {target.id} is already being driven by pid {holder}[/red]\n"
+                f"[dim]stop it first: orchestrator stop {target.id}[/dim]"
+            )
+            raise typer.Exit(1)
+
+        with _holding(target.id):
+            run_id = scheduler.advance(session, target).id
 
     _show(run_id)
 

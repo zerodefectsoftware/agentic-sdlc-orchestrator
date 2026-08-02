@@ -8,6 +8,7 @@ picks it up and finishes.
 
 from __future__ import annotations
 
+import os
 import textwrap
 
 import pytest
@@ -672,3 +673,63 @@ def test_withdrawing_a_result_reopens_the_checkpoint_waiting_on_it(cli, workspac
         run = session.get(Run, run_id)
         assert store.get_node(session, run, "design-approval").status is NodeStatus.STALE
         assert not [a for a in run.approvals if a.decision is Decision.PENDING]
+
+
+# --------------------------------------------------------------------------- #
+# aborting a run
+# --------------------------------------------------------------------------- #
+
+
+def test_a_run_can_be_stopped_and_resumed(cli, workspace):
+    """Every workflow engine can cancel; this one could only be `pkill`ed.
+
+    A wave here is potentially eight code agents running for twenty minutes, so
+    "stops before the next wave" was not a usable answer to "end this".
+    """
+    start(cli, workspace)
+    run_id = _latest_run_id(cli, workspace)
+
+    output = invoke(cli, workspace, "stop", run_id, "--by", "ops")
+    assert "stopped" in output
+
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert run.status is RunStatus.STOPPED
+        assert "ops" in run.stop_reason
+
+
+def test_stopping_returns_in_flight_work_to_pending(cli, workspace):
+    """Whatever was mid-wave did not finish, so it has to run again.
+
+    Leaving it RUNNING is what wedged killed runs: RUNNING is not collectable,
+    so the node could never be reached again and the run could not advance.
+    """
+    start(cli, workspace)
+    run_id = _latest_run_id(cli, workspace)
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        store.get_node(session, run, "build").status = NodeStatus.RUNNING
+        session.commit()
+
+    invoke(cli, workspace, "stop", run_id, "--by", "ops")
+
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "build").status is NodeStatus.PENDING
+
+
+def test_a_run_already_being_driven_is_not_started_twice(cli, workspace):
+    """Two processes advancing one run would interleave waves on shared state."""
+    from orchestrator.cli.main import _holder
+
+    start(cli, workspace)
+    run_id = _latest_run_id(cli, workspace)
+    holder = _holder(run_id)
+    holder.parent.mkdir(parents=True, exist_ok=True)
+    holder.write_text(str(os.getpid()))          # this process counts as alive
+    try:
+        result = cli.invoke(app, ["resume", run_id])
+        assert result.exit_code == 1
+        assert "already being driven" in result.output
+    finally:
+        holder.unlink(missing_ok=True)

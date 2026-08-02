@@ -1,6 +1,7 @@
 # Final engineering summary
 
-**DRAFT — figures marked ⧗ are from a run still in flight and must be refreshed before submission.**
+**Greenfield ran end to end and was accepted on 2026-08-02.** Figures below are from that
+run, `610c782beb9a4ea6bc7c8d06444eb432`, and from the 492-test suite as committed.
 
 ---
 
@@ -12,10 +13,10 @@ workload it drives — the demo, not the deliverable.
 
 | Layer | Size | Role |
 | --- | --- | --- |
-| Orchestration layer | ~6,500 lines | gates, policy, lineage, evidence, metrics, workers — the graded differentiator |
-| Graph runtime | ~1,640 lines | plan model, loader, wave scheduler |
-| Target (shortener) | 8 modules | the SDLC's workload |
-| Tests | 465 | all deterministic; no test calls a model |
+| Orchestration layer | ~7,900 lines | gates, policy, lineage, evidence, metrics, workers — the graded differentiator |
+| Graph runtime | ~1,700 lines | plan model, loader, wave scheduler |
+| Target (shortener) | 8 modules, 1,557 lines | the SDLC's workload — 86 tests, 93.64% coverage |
+| Tests | 492 | all deterministic; no test calls a model |
 
 Three plan files describe three scenarios. The engine is fixed; **a scenario is data**
 (D16), and brownfield/ambiguous are deltas over greenfield rather than copies (D19).
@@ -56,9 +57,9 @@ earned itself repeatedly in live running (§5).
 | `intake.register` v1→v3 | 5 requirements, 20 acceptance criteria, 13 ambiguities — 9 self-disposed as assumptions, 4 escalated to a human, all 13 disposed by v3 |
 | `design.spec` v1→v4 | v1 **rejected** at the checkpoint; v4 is 8 modules, 33 elements, 6 endpoints, 48 exports, acyclic |
 | Stub packages | 24 functions, every body `raise NotImplementedError`, verified by AST |
-| `tests-acceptance.suite` | 38 tests over 20 criteria, authored **before** implementation, RED gate held |
+| `tests-acceptance.suite` | 86 tests over 20 criteria, authored **before** implementation, RED gate held |
 | `*.changeset` | per node: files written, writes denied, scope declared |
-| Evidence bundle | assembled at release readiness ⧗ |
+| Evidence bundle | assembled and **RELEASABLE** — every gate held, every approval current |
 
 Every artifact is on disk under `runs/<id>/artifacts/<name>/vN`, readable with `cat`, with
 its producing attempt recorded in SQLite.
@@ -129,14 +130,20 @@ Recorded rather than resolved silently — the register carries all 13 with disp
 
 ## 7. Limitations
 
-**Observability.** The whole run is one database transaction — status, attempts and gate
-records are invisible until the process stops. A code-agent session records nothing until it
-ends. Both are known, neither is fixed. Committing per wave is a small change and the
-obvious next step.
+**Observability.** Fixed during this work, and the fix is instructive: the whole run used to
+be one transaction, so nothing was visible until the process exited. A wave is now the commit
+boundary, nodes report RUNNING before dispatch, and `orchestrator watch` follows a live run
+from another terminal. Most of the day's debugging cost was paid to *not* having this.
 
-**Coverage of the graph.** ⧗ Requirements through design are proven live several times over.
-`tests`, `docs`, `security`, release readiness and the evidence bundle are in first live
-running now. Brownfield has never been run.
+What remains: a code-agent session still records nothing until it ends, so a wave in flight
+shows which node is running but not what it is doing.
+
+**Coverage of the graph.** Greenfield is proven end to end: 20 nodes, 63 attempts, 11
+incidents all recovered, 0 unrecovered. The ambiguous scenario is proven through
+requirements — 15 ambiguities surfaced from one sentence, 5 escalated, a human checkpoint
+taken. **Brownfield has never been executed**: its plan is written and was audited against
+the current engine (two real defects found and fixed — see §5), but no run exists, and a
+plan that has not run is a design, not a result.
 
 **Scale.** SQLite, single node, whole-tree rollback. Fine for a prototype, wrong for a fleet.
 

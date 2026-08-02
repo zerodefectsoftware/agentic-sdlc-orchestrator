@@ -24,6 +24,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from shortener.config import get_settings
+from shortener.errors import CodeCollisionError, StorageError
 from sqlalchemy import (
     Column,
     Connection,
@@ -40,9 +42,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-
-from shortener.config import get_settings
-from shortener.errors import CodeCollisionError, StorageError
 
 metadata = MetaData()
 

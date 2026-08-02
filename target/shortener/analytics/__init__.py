@@ -25,11 +25,10 @@ import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import ColumnElement, Connection, and_, func, select
-
 from shortener.config import get_settings
 from shortener.errors import AnalyticsUnavailableError, InvalidQueryError
 from shortener.storage import ClickRow, clicks_table, connection, insert_clicks
+from sqlalchemy import ColumnElement, Connection, and_, func, select
 
 logger = logging.getLogger(__name__)
 

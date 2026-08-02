@@ -35,8 +35,6 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
 from shortener import analytics, links, storage
 from shortener.errors import (
     AppError,
@@ -46,6 +44,7 @@ from shortener.errors import (
     StorageError,
 )
 from shortener.ratelimit import enforce_rate_limit
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
 
