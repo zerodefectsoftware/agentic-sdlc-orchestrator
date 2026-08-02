@@ -472,6 +472,28 @@ def test_each_child_is_scoped_to_its_own_module(session, tmp_path, fanout_worker
     assert not WorkScope.for_node(api).permits("target/shortener/storage/db.py")
 
 
+def test_a_child_carries_the_template_session_limits(session, tmp_path, fanout_worker):
+    """A per-module budget is only settable if the template can carry one.
+
+    Without it every child falls back to a default tuned for nothing in
+    particular — and a ceiling sized for one module is the wrong ceiling for a
+    node that used to write seven.
+    """
+    plan = plan_from(tmp_path, FANOUT.replace(
+        '      write_scope: ["target/shortener/{item.path}/**"]',
+        '      write_scope: ["target/shortener/{item.path}/**"]\n'
+        "      params:\n        max_turns: 60\n        timeout_s: 1800",
+    ))
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    scheduler.advance(
+        session, scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+    )
+
+    api = scheduler._runtime["impl:api"]
+    assert api.params["max_turns"] == 60
+    assert api.params["timeout_s"] == 1800
+
+
 def test_children_inherit_the_stage_of_the_fanout(session, tmp_path, fanout_worker):
     plan = plan_from(tmp_path, FANOUT)
     scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)

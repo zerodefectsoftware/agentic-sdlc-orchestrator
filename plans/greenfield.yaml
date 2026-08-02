@@ -76,8 +76,15 @@ nodes:
     needs: [ambiguity-triage, normalize-clarification]   # SKIPPED when nothing escalated
     inputs: [intake.artifacts.register]
     output_schema: schemas/design.json
-    outputs: [spec, modules]          # gates read design.spec;
-                                      # impl fans out over design.modules
+    outputs: [spec, modules, interfaces]   # gates read design.spec;
+                                           # impl fans out over design.modules;
+                                           # scaffold generates from design.interfaces
+    # The architect decides the names modules call each other by — every export,
+    # every signature, every exception — because that is the one decision no
+    # implementer has the authority to make. It does not write the stubs: those
+    # are generated from this contract by `scaffold`, so the code and the
+    # contract cannot disagree and no model call can quietly implement the
+    # product while claiming to declare it (D8, D24).
     gate:                             # G3
       all:
         - predicate: contract_is_valid          # a predicate, not an expression:
@@ -85,6 +92,8 @@ nodes:
                                                 # and its author cannot vouch for it
         - predicate: requirement_design_matrix_complete   # both directions
         - predicate: no_unmapped_design_elements          # catches gold-plating
+        - predicate: every_module_has_an_interface        # nothing fans out uncontracted
+        - predicate: module_dependencies_are_acyclic      # parallel work needs a DAG
 
   - id: design-approval
     kind: human
@@ -106,14 +115,17 @@ nodes:
     params:
       root: "{target.root}"
     outputs: [manifest]
-    write_scope: ["{target.root}/**"]
+    write_scope: ["{target.root}/**"]  # every package: it is writing the contract
+                                       # the fan-out then writes against
     verify:                           # the engine runs these; the node does not
       - "sh:{target.commands.lint}"
       - py:orchestrator.gates.imports_resolve
-    gate:                             # G4
-      all:
+    gate:                             # G4 — the stubs are real code, and every
+      all:                            # promised name is now importable
         - "imports.resolve == true"
         - "ruff.exit_code == 0"
+        - "scaffold.exports > 0"      # empty packages are what the fan-out
+                                      # previously had to agree on
 
   - id: tests-acceptance
     kind: codeagent
@@ -134,35 +146,49 @@ nodes:
         - predicate: every_ac_has_a_test
 
   - id: impl
-    kind: codeagent
+    kind: fanout
     stage: implementation
-    role: implementer
     needs: [tests-acceptance]
-    inputs: [design.artifacts.spec, intake.artifacts.register]
-    # One author for the whole target, not one per module. A greenfield build
-    # has no interfaces yet: the names modules call each other by are decided
-    # *while* the code is written, so parallel authors agree on them only by
-    # luck. A live run showed exactly that — `links` importing three exception
-    # names from a module whose author had not run.
+    from: design.artifacts.modules    # graph shape derived at runtime
+    # One implementer per module, in parallel — restored, because the condition
+    # that made it unsafe is gone (D24 supersedes D23).
     #
-    # The cost is real and accepted: no parallelism in implementation, and the
-    # blast radius is the whole target rather than one directory (D7 is reduced
-    # to the target boundary here). Brownfield keeps the fan-out, where the
-    # interfaces already exist in the codebase being changed. See D23.
-    write_scope: ["{target.root}/**"]
-    freeze_paths: ["{target.tests_root}/**"]   # D6: not the suite judging it
-    params:
-      root: "{target.root}"
-      max_turns: 200          # seven modules is not a one-module job
-      timeout_s: 3600
-    verify:
-      - "sh:{target.commands.lint}"
-      - py:orchestrator.gates.imports_resolve
-    gate:                             # G6
-      all:
-        - "session.files_written > 0"
-        - "ruff.exit_code == 0"
-        - "imports.resolve == true"   # the modules have to import each other
+    # The first fan-out failed on names, not on concurrency: `links` imported
+    # three exception types from `errors`, whose author had not run and might
+    # have spelled any of them differently. Nobody had the authority to decide
+    # them. Now the architect does, `scaffold` generates them, and every name a
+    # module calls its siblings by is already importable before any body is
+    # written. A child writes bodies behind names it did not choose.
+    #
+    # An implementer that believes a contract is wrong ESCALATES. It may read
+    # every sibling stub and write none of them — a contract silently edited by
+    # one of its consumers is not a contract.
+    template:
+      kind: codeagent
+      role: implementer
+      inputs: [design.artifacts.spec, design.artifacts.interfaces,
+               intake.artifacts.register]
+      write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
+      freeze_paths: ["{target.tests_root}/**"]        # D6: not the suite judging it
+      params:
+        max_turns: 60         # one module, against a settled contract
+        timeout_s: 1800
+      verify:
+        - "sh:{target.commands.lint_path} {target.root}/{item.path}"
+        - py:orchestrator.gates.imports_resolve
+      gate:                           # G6, per module. Scoped to this module on
+        all:                          # purpose: the acceptance suite cannot be
+                                      # green until the last child lands, so
+                                      # every earlier one would fail for work
+                                      # that was never its own. G7 is where the
+                                      # suite has to be green.
+          - "session.files_written > 0"   # an implementer that wrote nothing
+                                          # lints clean; seven of them did, and
+                                          # every gate reported green
+          - "ruff.exit_code == 0"
+          - "imports.resolve == true"     # newly meaningful: the stubs mean a
+                                          # module's imports resolve at its own
+                                          # gate, not two nodes later
 
   # ── Verify (parallel, then join) ────────────────────────────────────────
   - id: tests

@@ -18,11 +18,14 @@ from orchestrator.artifacts import (
     Ambiguity,
     Design,
     DesignElement,
+    Export,
+    Interface,
     Module,
     RequirementRegister,
     Severity,
 )
 from orchestrator.derive import scaffold_from_design
+from orchestrator.derive.scaffold import ContractError
 from orchestrator.engine.plan import Node
 from orchestrator.gates.checks import imports_resolve, report_coverage
 from orchestrator.gates.facts import FactSource
@@ -242,6 +245,131 @@ def test_scaffolding_a_design_with_no_modules_still_makes_the_package():
     output = scaffold_from_design(task({"design.spec": Design().model_dump_json()}))
     assert list(output.files) == ["target/shortener/__init__.py"]
     assert json.loads("{}") == {}  # sanity: the artifact bodies are plain text, not JSON
+
+
+# --------------------------------------------------------------------------- #
+# the contract the fan-out writes against (D24)
+# --------------------------------------------------------------------------- #
+
+
+def contracted() -> Design:
+    """Two modules where one calls the other — the shape that used to break."""
+    return Design(
+        modules=[Module(name="errors", path="errors"), Module(name="links", path="links")],
+        interfaces=[
+            Interface(
+                module="errors",
+                exports=[
+                    Export(name="LinkNotFound", kind="exception", summary="no such code"),
+                    Export(name="LinkExpired", kind="exception", summary="past expiry"),
+                ],
+            ),
+            Interface(
+                module="links",
+                depends_on=["errors"],
+                exports=[
+                    Export(
+                        name="resolve",
+                        kind="function",
+                        signature="(code: str) -> str",
+                        summary="resolve a code to its long URL",
+                        raises=["LinkNotFound", "LinkExpired"],
+                    )
+                ],
+            ),
+        ],
+    )
+
+
+def test_every_promised_name_exists_before_anyone_implements_it():
+    """The failure D24 fixes: `links` imported three names `errors` never defined."""
+    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
+
+    errors = output.files["target/shortener/errors/__init__.py"]
+    assert "class LinkNotFound(Exception):" in errors
+    assert "class LinkExpired(Exception):" in errors
+
+    links = output.files["target/shortener/links/__init__.py"]
+    assert "def resolve(code: str) -> str:" in links
+    assert "raise NotImplementedError" in links
+
+
+def test_the_generated_stubs_are_valid_python():
+    """A signature is authored text that becomes code; unparseable is not a stub."""
+    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
+    for path, body in output.files.items():
+        compile(body, path, "exec")
+
+
+def test_a_stub_declares_what_it_raises_and_who_it_depends_on():
+    """Both are contract, and both are what a caller has to know in advance."""
+    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
+    links = output.files["target/shortener/links/__init__.py"]
+    assert "Depends on: errors" in links
+    assert "LinkNotFound" in links and "LinkExpired" in links
+
+
+def test_the_generator_cannot_implement_the_product():
+    """Why this is a derivation, not an agent (D8): there is no body to write.
+
+    A code agent told to write stubs will eventually write one that works. A
+    generator has no such option, which is why the 'did you cheat' gate this
+    design first proposed turned out to be unnecessary.
+    """
+    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
+    bodies = "\n".join(output.files.values())
+    assert bodies.count("raise NotImplementedError") == 1   # the one function
+    assert "return " not in bodies
+
+
+def test_the_exports_fact_is_what_the_gate_counts():
+    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
+    assert output.facts["scaffold.exports"] == 3
+    assert output.facts["scaffold.interfaces"] == 2
+
+
+def test_a_circular_contract_is_refused_before_any_code_is_written():
+    """Parallel implementation is only safe over a DAG.
+
+    Two modules that must change together cannot both be written against a
+    contract that is settled — neither one's is.
+    """
+    design = Design(
+        modules=[Module(name="a", path="a"), Module(name="b", path="b")],
+        interfaces=[
+            Interface(module="a", depends_on=["b"], exports=[Export(name="f", kind="function")]),
+            Interface(module="b", depends_on=["a"], exports=[Export(name="g", kind="function")]),
+        ],
+    )
+    with pytest.raises(ContractError, match="acyclic"):
+        scaffold_from_design(task({"design.spec": design.model_dump_json()}))
+
+
+def test_a_signature_that_is_not_a_signature_names_the_export_that_broke_it():
+    """The useful failure identifies the contract entry, not the generated file."""
+    design = Design(
+        modules=[Module(name="links", path="links")],
+        interfaces=[
+            Interface(
+                module="links",
+                exports=[Export(name="resolve", kind="function", signature="code -> str")],
+            )
+        ],
+    )
+    with pytest.raises(ContractError, match="links.resolve"):
+        scaffold_from_design(task({"design.spec": design.model_dump_json()}))
+
+
+def test_a_module_without_an_interface_still_gets_a_package():
+    """The graph shape must not depend on how complete the contract is.
+
+    The gate rejects an uncontracted module; the generator still has to produce
+    a tree that imports, or the gate never gets to say so.
+    """
+    design = Design(modules=[Module(name="orphan", path="orphan")])
+    output = scaffold_from_design(task({"design.spec": design.model_dump_json()}))
+    assert "target/shortener/orphan/__init__.py" in output.files
+    assert output.facts["scaffold.exports"] == 0
 
 
 # --------------------------------------------------------------------------- #

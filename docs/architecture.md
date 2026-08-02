@@ -639,7 +639,7 @@ Adds:
 | `baseline-capture` node | Runs the existing suite and snapshots the tree **before anything writes**. Gate: `baseline_is_green` — a red baseline is a stop, not a caveat, because nothing downstream could then distinguish a regression from an inherited failure. Also supplies the rollback target (D21). |
 | `codebase-map` node | Parses the target with `ast` into files and symbols. Derived, not described — it is the ground truth the next node is checked against. |
 | `impact-analysis` node | §4.3 of the brief: impacted modules, contract diff, invalidated prior decisions, regression surface, risk. Gate: `every_referenced_symbol_exists` — every symbol it names is checked against the map. Fluent analysis of code that does not exist is the characteristic brownfield failure, and it reads as thorough right up until someone checks. |
-| Restricted fan-out | `impl` fans out over `impact-analysis.affected_modules`: in brownfield the blast radius is discovered, not declared. This is also the scenario where fanning out is *safe* — the interfaces the modules call each other by already exist in the code being changed, which is why greenfield uses a single author instead (D23). |
+| Restricted fan-out | `impl` fans out over `impact-analysis.affected_modules`: in brownfield the blast radius is discovered, not declared. Both plans fan out; they differ in where the contract comes from — brownfield reads interfaces that already exist in the code being changed, greenfield writes against one the architect settled first (D24). |
 | Regression gate | Two populations, opposite requirements. New tests **red→green** (the RED gate means something sharper here: a test that does not reproduce the reported defect has not reproduced anything). Existing tests **green→green**, as a set difference against the baseline's failures — `pytest.exit_code == 0` cannot express this. |
 | Breaking-change escalation | `has_breaking_contract_change` on the analysis activates an optional human node. An agent deciding on its own that a break is acceptable is exactly the decision this system does not delegate (D13, D15's sibling). |
 | Approval widened | `design-approval` binds to the impact analysis as well as the design: approving a design without the blast radius it rests on is approving half the decision (D10). |
@@ -718,7 +718,8 @@ claimed.
 | **D20** | The target profile is the only place the target is named, and `{target.*}` resolves at load time | D3 says the orchestrator never imports the target; this is what keeps that survivable. Retargeting is a config change, and a resolved plan means `--dry-run` shows the command that will actually run | A plan is not fully readable without its profile |
 | **D21** | The baseline stores file **bodies**, not a reference to them | A rollback that can only name the state it wanted is a rollback in the documentation only. Content also means it works on a dirty tree and needs no VCS | Snapshot size grows with the target; fine at this scale, wrong for a large repo |
 | **D22** | A node declares `verify:` — checks the engine runs after the work, whose facts the gate then reads | The alternative is a gate expression naming a fact nothing produces (which ERRORs) or a node reporting on its own output (which D4 forbids). Also the only shape that works for fan-out children, where a per-module check cannot be a separate node | The plan carries commands as well as intent; a check is only as good as the tool behind it |
-| **D23** | Greenfield implementation is **one agent over the whole target**; brownfield keeps the per-module fan-out | In a new build the names modules call each other by are decided *while* the code is written, so parallel authors agree on them only by luck. A live run produced `links` importing three exception types from a module whose author had not run yet. Brownfield changes a codebase whose interfaces already exist, so its modules can be written in parallel without agreeing on anything new | No parallelism in greenfield implementation, and the blast radius widens from one directory to the target (D7 reduces to the target boundary there). The suite stays frozen either way, so D6 is unaffected |
+| **D23** | *(superseded by D24)* Greenfield implementation is **one agent over the whole target**; brownfield keeps the per-module fan-out | In a new build the names modules call each other by are decided *while* the code is written, so parallel authors agree on them only by luck. A live run produced `links` importing three exception types from a module whose author had not run yet | Kept in the registry rather than deleted: it is the correct response to a greenfield build with **no contract**, and it is what the run of 2026-08-01 was parked against. D24 removes the premise instead of accepting the cost |
+| **D24** | The **architect owns the contract between modules** — every export, signature and exception — and `scaffold` generates stubs from it deterministically. The per-module fan-out returns | D23 fixed the symptom. The fan-out did not fail from concurrency; it failed because no one had the authority to name things, so seven authors each invented the interfaces they needed. Giving that authority to the architect removes the premise: a child writes bodies behind names it did not choose, and its imports resolve at its own gate rather than two nodes later. Generating rather than writing the stubs is what makes the code and the contract unable to disagree — and a generator cannot quietly implement the product, which a code agent asked for stubs eventually would | One more thing the architect must get right, and it is checked (`every_module_has_an_interface`, `module_dependencies_are_acyclic`) rather than trusted. A contract found wrong mid-implementation is an escalation, not a local fix — an implementer may read every sibling stub and write none of them. The module decomposition must be a DAG, so two modules that must change together have to be merged |
 | **D2** | SQLite backs orchestration state, not just target data | Safe-stop resumability and reliability metrics need durable, queryable run state | Single-node only |
 | **D3** | `orchestrator` never imports `shortener`; target specifics in a config profile | Makes generality checkable rather than claimed | Some indirection |
 | **D4** | Exit gates evaluated by a non-producer, preferably a real tool | Agent self-reports are assertions, not evidence | Gates limited to machine-checkable properties |
@@ -1033,11 +1034,11 @@ the two agree with each other and with the plan on disk, so the copy here cannot
 | `ambiguity-triage` | tool | requirements | `intake` | — | G2 every ambiguity disposed **or** escalated |
 | `clarify-with-human` | human | requirements | — (optional) | — | — |
 | `normalize-clarification` | tool | requirements | `clarify-with-human` | `register` (v+1) | G2b something was resolved; no ambiguity left undisposed |
-| `design` | agent (`architect`) | design | triage, normalize | `spec`, `modules` | G3 contract valid; requirement↔design matrix complete both ways; no unmapped design elements |
+| `design` | agent (`architect`) | design | triage, normalize | `spec`, `modules`, `interfaces` | G3 contract valid; requirement↔design matrix complete both ways; no unmapped design elements; every module has an interface; module dependencies acyclic |
 | `design-approval` | human | design | `design` | — | binds to `design.spec` (D10) |
-| `scaffold` | derive | implementation | `design-approval` | `manifest` | G4 imports resolve; lint clean |
+| `scaffold` | derive | implementation | `design-approval` | `manifest` | G4 imports resolve; lint clean; the contract generated something (`scaffold.exports > 0`) |
 | `tests-acceptance` | codeagent (`test-author`) | verification | `scaffold` | `suite` | **G5 the RED gate** — files written, `pytest.exit_code != 0`, every AC has a test |
-| `impl` | codeagent (`implementer`) | implementation | `tests-acceptance` | — | G6 files written; lint clean; imports resolve |
+| `impl` | fanout → codeagent (`implementer`) | implementation | `tests-acceptance` | — | G6 **per module**: files written; lint clean; that module's imports resolve |
 | `tests` | tool | verification | `impl` | — | **G7 the GREEN gate** — pytest passes, coverage ≥ threshold, AC↔test matrix complete |
 | `docs` | codeagent (`technical-writer`) | documentation | `impl` | `readme` | G8 setup steps execute in a clean venv; documented endpoints match the OpenAPI |
 | `security` | tool | verification | `impl` | `report` | G9 no unapproved high findings. `may_waive: false` |
@@ -1142,8 +1143,15 @@ nodes:
     needs: [ambiguity-triage, normalize-clarification]   # SKIPPED when nothing escalated
     inputs: [intake.artifacts.register]
     output_schema: schemas/design.json
-    outputs: [spec, modules]          # gates read design.spec;
-                                      # impl fans out over design.modules
+    outputs: [spec, modules, interfaces]   # gates read design.spec;
+                                           # impl fans out over design.modules;
+                                           # scaffold generates from design.interfaces
+    # The architect decides the names modules call each other by — every export,
+    # every signature, every exception — because that is the one decision no
+    # implementer has the authority to make. It does not write the stubs: those
+    # are generated from this contract by `scaffold`, so the code and the
+    # contract cannot disagree and no model call can quietly implement the
+    # product while claiming to declare it (D8, D24).
     gate:                             # G3
       all:
         - predicate: contract_is_valid          # a predicate, not an expression:
@@ -1151,6 +1159,8 @@ nodes:
                                                 # and its author cannot vouch for it
         - predicate: requirement_design_matrix_complete   # both directions
         - predicate: no_unmapped_design_elements          # catches gold-plating
+        - predicate: every_module_has_an_interface        # nothing fans out uncontracted
+        - predicate: module_dependencies_are_acyclic      # parallel work needs a DAG
 
   - id: design-approval
     kind: human
@@ -1172,14 +1182,17 @@ nodes:
     params:
       root: "{target.root}"
     outputs: [manifest]
-    write_scope: ["{target.root}/**"]
+    write_scope: ["{target.root}/**"]  # every package: it is writing the contract
+                                       # the fan-out then writes against
     verify:                           # the engine runs these; the node does not
       - "sh:{target.commands.lint}"
       - py:orchestrator.gates.imports_resolve
-    gate:                             # G4
-      all:
+    gate:                             # G4 — the stubs are real code, and every
+      all:                            # promised name is now importable
         - "imports.resolve == true"
         - "ruff.exit_code == 0"
+        - "scaffold.exports > 0"      # empty packages are what the fan-out
+                                      # previously had to agree on
 
   - id: tests-acceptance
     kind: codeagent
@@ -1200,35 +1213,49 @@ nodes:
         - predicate: every_ac_has_a_test
 
   - id: impl
-    kind: codeagent
+    kind: fanout
     stage: implementation
-    role: implementer
     needs: [tests-acceptance]
-    inputs: [design.artifacts.spec, intake.artifacts.register]
-    # One author for the whole target, not one per module. A greenfield build
-    # has no interfaces yet: the names modules call each other by are decided
-    # *while* the code is written, so parallel authors agree on them only by
-    # luck. A live run showed exactly that — `links` importing three exception
-    # names from a module whose author had not run.
+    from: design.artifacts.modules    # graph shape derived at runtime
+    # One implementer per module, in parallel — restored, because the condition
+    # that made it unsafe is gone (D24 supersedes D23).
     #
-    # The cost is real and accepted: no parallelism in implementation, and the
-    # blast radius is the whole target rather than one directory (D7 is reduced
-    # to the target boundary here). Brownfield keeps the fan-out, where the
-    # interfaces already exist in the codebase being changed. See D23.
-    write_scope: ["{target.root}/**"]
-    freeze_paths: ["{target.tests_root}/**"]   # D6: not the suite judging it
-    params:
-      root: "{target.root}"
-      max_turns: 200          # seven modules is not a one-module job
-      timeout_s: 3600
-    verify:
-      - "sh:{target.commands.lint}"
-      - py:orchestrator.gates.imports_resolve
-    gate:                             # G6
-      all:
-        - "session.files_written > 0"
-        - "ruff.exit_code == 0"
-        - "imports.resolve == true"   # the modules have to import each other
+    # The first fan-out failed on names, not on concurrency: `links` imported
+    # three exception types from `errors`, whose author had not run and might
+    # have spelled any of them differently. Nobody had the authority to decide
+    # them. Now the architect does, `scaffold` generates them, and every name a
+    # module calls its siblings by is already importable before any body is
+    # written. A child writes bodies behind names it did not choose.
+    #
+    # An implementer that believes a contract is wrong ESCALATES. It may read
+    # every sibling stub and write none of them — a contract silently edited by
+    # one of its consumers is not a contract.
+    template:
+      kind: codeagent
+      role: implementer
+      inputs: [design.artifacts.spec, design.artifacts.interfaces,
+               intake.artifacts.register]
+      write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
+      freeze_paths: ["{target.tests_root}/**"]        # D6: not the suite judging it
+      params:
+        max_turns: 60         # one module, against a settled contract
+        timeout_s: 1800
+      verify:
+        - "sh:{target.commands.lint_path} {target.root}/{item.path}"
+        - py:orchestrator.gates.imports_resolve
+      gate:                           # G6, per module. Scoped to this module on
+        all:                          # purpose: the acceptance suite cannot be
+                                      # green until the last child lands, so
+                                      # every earlier one would fail for work
+                                      # that was never its own. G7 is where the
+                                      # suite has to be green.
+          - "session.files_written > 0"   # an implementer that wrote nothing
+                                          # lints clean; seven of them did, and
+                                          # every gate reported green
+          - "ruff.exit_code == 0"
+          - "imports.resolve == true"     # newly meaningful: the stubs mean a
+                                          # module's imports resolve at its own
+                                          # gate, not two nodes later
 
   # ── Verify (parallel, then join) ────────────────────────────────────────
   - id: tests

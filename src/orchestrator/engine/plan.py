@@ -176,6 +176,7 @@ class NodeTemplate(BaseModel):
     kind: NodeKind
     role: str | None = None
     inputs: list[str] = Field(default_factory=list)   # a child has no `needs` to inherit from
+    params: dict[str, Any] = Field(default_factory=dict)  # turn and time limits per child
     verify: list[str] = Field(default_factory=list)
     write_scope: list[str] = Field(default_factory=list)
     freeze_paths: list[str] = Field(default_factory=list)

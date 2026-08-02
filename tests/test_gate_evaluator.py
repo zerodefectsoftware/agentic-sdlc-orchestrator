@@ -299,8 +299,27 @@ def test_scaffold_gate_passes_against_a_clean_build():
     from orchestrator.engine.loader import load_plan
 
     plan = load_plan("plans/greenfield.yaml")
-    facts = tool_facts("scaffold", **{"imports.resolve": True, "ruff.exit_code": 0})
+    facts = tool_facts(
+        "scaffold",
+        **{"imports.resolve": True, "ruff.exit_code": 0, "scaffold.exports": 24},
+    )
     assert evaluate_gate(plan.node("scaffold").gate, facts).passed
+
+
+def test_scaffold_gate_rejects_empty_packages():
+    """D24: seven empty directories are what the first fan-out had to agree on.
+
+    A scaffold that lints and imports cleanly while exporting nothing is exactly
+    the state that made parallel implementation unsafe, and it used to pass.
+    """
+    from orchestrator.engine.loader import load_plan
+
+    plan = load_plan("plans/greenfield.yaml")
+    facts = tool_facts(
+        "scaffold",
+        **{"imports.resolve": True, "ruff.exit_code": 0, "scaffold.exports": 0},
+    )
+    assert not evaluate_gate(plan.node("scaffold").gate, facts).passed
 
 
 def test_red_gate_rejects_a_suite_that_already_passes():

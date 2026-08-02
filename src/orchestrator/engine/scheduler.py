@@ -380,6 +380,12 @@ class Scheduler:
                 # handed the raw requirement and nothing else — not the design
                 # it is implementing, nor the tests it has to satisfy.
                 inputs=list(template.inputs),
+                # A child session needs its own turn and time limits. Without
+                # these the worker falls back to a default tuned for nothing in
+                # particular, and a per-module budget cannot be set at all.
+                # Passed through as authored: the item's own fields belong in
+                # `write_scope` and `verify`, where `{item.*}` is substituted.
+                params=dict(template.params),
                 freeze_paths=list(template.freeze_paths),
                 gate=template.gate,
                 model=template.model,

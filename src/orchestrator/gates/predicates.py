@@ -229,6 +229,76 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
         return True, f"{len(design.endpoints)} endpoints, all well-formed and distinct"
 
     # ------------------------------------------------------------------ #
+    # the module contract — what makes parallel implementation safe (D24)
+    # ------------------------------------------------------------------ #
+
+    @reg.register(
+        "every_module_has_an_interface",
+        "every module the implementation fans out over declares what it exports",
+    )
+    def every_module_has_an_interface(context: PredicateContext) -> tuple[bool, str]:
+        """A module fanned out with no contract is an author inventing names.
+
+        This is the check that would have caught the failure directly: `errors`
+        had no declared exports, so `links` invented three of them and the
+        mismatch surfaced two nodes later as an ImportError attributed to nobody.
+        """
+        design = _load(context, "design.spec", Design)
+        if not design.modules:
+            return False, "the design declares no modules — there is nothing to implement"
+
+        interfaces = design.interface_for
+        missing = sorted(m.name for m in design.modules if m.name not in interfaces)
+        if missing:
+            return False, (
+                f"{len(missing)} modules have no interface: {_listed(missing)} — "
+                f"their callers would have to invent the names"
+            )
+
+        silent = sorted(
+            m.name for m in design.modules if not interfaces[m.name].exports
+        )
+        if silent:
+            return False, (
+                f"{len(silent)} modules export nothing: {_listed(silent)} — "
+                f"a module nobody can call is not a module"
+            )
+
+        exports = sum(len(i.exports) for i in design.interfaces)
+        return True, f"{len(design.modules)} modules declare {exports} exports between them"
+
+    @reg.register(
+        "module_dependencies_are_acyclic",
+        "the declared module dependency graph is a DAG, and names only real modules",
+    )
+    def module_dependencies_are_acyclic(context: PredicateContext) -> tuple[bool, str]:
+        """Parallel implementation is only safe over a DAG.
+
+        Two modules that must change together are one module. Shipping them as
+        separate parallel work means neither can be written against a contract
+        that is settled, which is the condition this whole design depends on.
+        """
+        design = _load(context, "design.spec", Design)
+        known = {module.name for module in design.modules}
+
+        dangling = sorted(
+            f"{interface.module} -> {dependency}"
+            for interface in design.interfaces
+            for dependency in interface.depends_on
+            if dependency not in known
+        )
+        if dangling:
+            return False, f"dependencies on modules that do not exist: {_listed(dangling)}"
+
+        cycles = design.dependency_cycles()
+        if cycles:
+            trails = [" -> ".join([*cycle, cycle[0]]) for cycle in cycles]
+            return False, f"{len(cycles)} dependency cycles: {_listed(trails)}"
+
+        edges = sum(len(i.depends_on) for i in design.interfaces)
+        return True, f"{edges} module dependencies, acyclic"
+
+    # ------------------------------------------------------------------ #
     # traceability
     # ------------------------------------------------------------------ #
 

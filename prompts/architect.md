@@ -42,6 +42,40 @@ module, each able to write only its own directory — so:
   configuration are not modules — a separate node owns each of those, and
   listing them here fans out a coding agent to write files nobody will import.
 
+## Interfaces
+
+**This is the part only you can do.** Every module is implemented in parallel by
+a different agent that can write nothing outside its own directory. They need
+the names they call each other by to already exist — so you decide them, here,
+before anyone writes a line. Stubs are generated from this contract
+automatically; you are not writing code, you are deciding names.
+
+For each module give an `interface` with:
+
+- `module` — the module name, matching the list above.
+- `depends_on` — the sibling modules it imports from. **This graph must be
+  acyclic.** Two modules that must change together are one module; if you cannot
+  break a cycle, merge them and say so in a decision element.
+- `exports` — every public name the module promises. Anything absent here does
+  not exist as far as its siblings are concerned.
+
+Each export needs a `name`, a `kind` (`function`, `class`, `exception`, or
+`type`), a one-line `summary`, and:
+
+- `signature` for functions — a parameter list with **type annotations and a
+  return type**: `(code: str, expires_at: datetime | None = None) -> Link`. It
+  is pasted into generated code, so it must be valid Python.
+- `raises` — the exception names this call may raise, including ones defined in
+  other modules. **Do not skip this.** Exceptions cross module boundaries more
+  than functions do, and they are the names implementers are likeliest to
+  invent. A live run failed on exactly this: a module imported three exception
+  types from a sibling that had not been written and might have spelled every
+  one of them differently.
+
+Export the smallest set that lets the modules work together. Every name here is
+one an implementer must honour exactly, and a name nobody calls is one more
+thing that has to trace to a requirement.
+
 ## Endpoints
 
 List the HTTP paths the design introduces. The documentation gate compares what

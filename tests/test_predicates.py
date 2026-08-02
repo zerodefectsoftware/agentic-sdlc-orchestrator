@@ -19,7 +19,9 @@ from orchestrator.artifacts import (
     Design,
     DesignElement,
     Disposition,
+    Export,
     Finding,
+    Interface,
     Module,
     Requirement,
     RequirementRegister,
@@ -475,6 +477,108 @@ def test_an_unbalanced_path_parameter_fails(registry, session, run, artifacts):
     passed, detail = contract(registry, session, run, artifacts, design_with("GET /{code"))
     assert not passed
     assert "unbalanced" in detail or "not '<METHOD>" in detail
+
+
+# --------------------------------------------------------------------------- #
+# the module contract — what makes parallel implementation safe (D24)
+# --------------------------------------------------------------------------- #
+
+
+def module_contract(registry, session, run, artifacts, design: Design, predicate: str):
+    record(session, run, artifacts, "design.spec", design)
+    return check(registry, predicate, context(session, run, artifacts))
+
+
+def two_modules(**interfaces: Interface) -> Design:
+    return Design(
+        modules=[Module(name=name, path=name) for name in interfaces],
+        interfaces=list(interfaces.values()),
+    )
+
+
+def exporting(module: str, *names: str, depends_on: list[str] | None = None) -> Interface:
+    return Interface(
+        module=module,
+        depends_on=depends_on or [],
+        exports=[Export(name=name, kind="function", signature="() -> None") for name in names],
+    )
+
+
+def test_a_settled_contract_lets_the_fan_out_proceed(registry, session, run, artifacts):
+    design = two_modules(
+        errors=exporting("errors", "LinkNotFound"),
+        links=exporting("links", "resolve", depends_on=["errors"]),
+    )
+    passed, detail = module_contract(
+        registry, session, run, artifacts, design, "every_module_has_an_interface"
+    )
+    assert passed
+    assert "2 modules" in detail
+
+
+def test_a_module_with_no_interface_blocks_the_fan_out(registry, session, run, artifacts):
+    """Exactly the failure: `errors` declared nothing, so `links` invented names."""
+    design = Design(
+        modules=[Module(name="errors", path="errors"), Module(name="links", path="links")],
+        interfaces=[exporting("links", "resolve", depends_on=["errors"])],
+    )
+    passed, detail = module_contract(
+        registry, session, run, artifacts, design, "every_module_has_an_interface"
+    )
+    assert not passed
+    assert "errors" in detail
+
+
+def test_a_module_that_exports_nothing_is_not_a_module(registry, session, run, artifacts):
+    design = two_modules(
+        errors=Interface(module="errors"),
+        links=exporting("links", "resolve", depends_on=["errors"]),
+    )
+    passed, detail = module_contract(
+        registry, session, run, artifacts, design, "every_module_has_an_interface"
+    )
+    assert not passed
+    assert "export nothing" in detail
+
+
+def test_an_acyclic_contract_passes(registry, session, run, artifacts):
+    design = two_modules(
+        errors=exporting("errors", "LinkNotFound"),
+        links=exporting("links", "resolve", depends_on=["errors"]),
+    )
+    passed, _ = module_contract(
+        registry, session, run, artifacts, design, "module_dependencies_are_acyclic"
+    )
+    assert passed
+
+
+def test_a_cycle_is_caught_at_the_design_gate(registry, session, run, artifacts):
+    """Two modules that must change together are one module.
+
+    Caught here rather than at scaffold, so the architect is told before a human
+    approves a decomposition that cannot be implemented in parallel.
+    """
+    design = two_modules(
+        a=exporting("a", "f", depends_on=["b"]),
+        b=exporting("b", "g", depends_on=["a"]),
+    )
+    passed, detail = module_contract(
+        registry, session, run, artifacts, design, "module_dependencies_are_acyclic"
+    )
+    assert not passed
+    assert "cycle" in detail
+
+
+def test_a_dependency_on_a_module_nobody_will_write_fails(registry, session, run, artifacts):
+    design = Design(
+        modules=[Module(name="links", path="links")],
+        interfaces=[exporting("links", "resolve", depends_on=["storage"])],
+    )
+    passed, detail = module_contract(
+        registry, session, run, artifacts, design, "module_dependencies_are_acyclic"
+    )
+    assert not passed
+    assert "storage" in detail
 
 
 # --------------------------------------------------------------------------- #

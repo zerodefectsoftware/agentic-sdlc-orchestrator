@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+import networkx as nx
 from pydantic import BaseModel, ConfigDict, Field
 
 _STRICT = ConfigDict(extra="forbid")
@@ -122,6 +123,39 @@ class DesignElement(BaseModel):
     satisfies: list[str] = Field(default_factory=list)  # requirement ids
 
 
+class Export(BaseModel):
+    """One public name a module promises its siblings (D24).
+
+    `raises` is not decoration. Exceptions cross module boundaries more often
+    than functions do, and they are the names an implementer is likeliest to
+    invent — a live fan-out died on three exception names imported from a module
+    whose author had not run.
+    """
+
+    model_config = _STRICT
+
+    name: str
+    kind: str                     # function | class | exception | type
+    signature: str | None = None  # "(code: str) -> Link" — annotations included
+    summary: str | None = None
+    raises: list[str] = Field(default_factory=list)  # exception names, from any module
+
+
+class Interface(BaseModel):
+    """What one module exports, and what it imports from its siblings.
+
+    This is the contract parallel implementers write against. It is authored by
+    the architect and generated into stubs deterministically, so a module's
+    callers and its author are reading the same names from the same source.
+    """
+
+    model_config = _STRICT
+
+    module: str                                        # matches Module.name
+    depends_on: list[str] = Field(default_factory=list)  # sibling module names
+    exports: list[Export] = Field(default_factory=list)
+
+
 class Design(BaseModel):
     """The `design` artifact: what will be built, and what each part is for."""
 
@@ -130,6 +164,25 @@ class Design(BaseModel):
     elements: list[DesignElement] = Field(default_factory=list)
     modules: list[Module] = Field(default_factory=list)
     endpoints: list[str] = Field(default_factory=list)
+    interfaces: list[Interface] = Field(default_factory=list)
+
+    @property
+    def interface_for(self) -> dict[str, Interface]:
+        return {interface.module: interface for interface in self.interfaces}
+
+    def dependency_cycles(self) -> list[list[str]]:
+        """Cycles in the declared module dependency graph.
+
+        Parallel implementation is only safe over a DAG: two modules that must
+        change together are one module, and shipping them as separate parallel
+        work is how a contract stops being decidable in advance.
+        """
+        graph = nx.DiGraph()
+        graph.add_nodes_from(interface.module for interface in self.interfaces)
+        for interface in self.interfaces:
+            for dependency in interface.depends_on:
+                graph.add_edge(interface.module, dependency)
+        return [cycle for cycle in nx.simple_cycles(graph)]
 
 
 # --------------------------------------------------------------------------- #

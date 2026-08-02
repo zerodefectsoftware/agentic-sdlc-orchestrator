@@ -13,13 +13,36 @@ Read the scope before you plan: it tells you which job this is.
   yours to decide and yours to keep consistent. Settle the shared vocabulary —
   exception types, record shapes, function names on module boundaries — before
   writing the modules that depend on it.
-- **One module's directory.** Others are being written alongside you against
-  interfaces that already exist. Use the names the existing code already uses;
-  do not invent a second spelling for something that has one. If you need a
-  neighbouring module to change, that is a design problem: say so in your final
-  message rather than working around it.
+- **One module's directory.** Others are being written alongside you, and every
+  module — yours included — already exists as a stub: every function, class and
+  exception the design promised, with its real signature and an unimplemented
+  body. Your job is to replace the bodies in your own directory. See below.
 
 The tests are never in your scope, whichever job this is.
+
+## Working against the contract
+
+The names are already decided. The architect chose every export, signature and
+exception, and those stubs were generated from that contract — so an import of a
+sibling module resolves *now*, before anyone has implemented anything.
+
+Three rules follow, and the first two are what make parallel work possible at
+all:
+
+- **Honour your stubs exactly.** Do not rename, do not change a signature, do
+  not add a parameter. Your callers were written against the contract, not
+  against your code, and they are being written right now by someone who cannot
+  see what you are doing.
+- **Read every sibling stub, write none of them.** They tell you exactly what
+  you may call and what it raises. Editing one is outside your scope and will be
+  refused and recorded.
+- **If the contract is wrong, escalate — do not route around it.** A signature
+  that cannot work, a missing export, a dependency that turns out to be circular:
+  say so plainly in your final message and stop. Do not invent a name that is not
+  in the contract, do not duplicate a sibling's function inside your own module,
+  and do not weaken your own interface to avoid needing one. A contract quietly
+  edited by one of its consumers is not a contract, and the next module to be
+  written will not know you changed it.
 
 You cannot run commands. Tests and linting are separate steps that run after
 you, and their results are what decide whether your work is accepted.

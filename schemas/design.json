@@ -11,12 +11,56 @@
           "title": "Kind",
           "type": "string"
         },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
         "satisfies": {
           "items": {
             "type": "string"
           },
           "title": "Satisfies",
           "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "DesignElement",
+      "type": "object"
+    },
+    "Export": {
+      "additionalProperties": false,
+      "description": "One public name a module promises its siblings (D24).\n\n`raises` is not decoration. Exceptions cross module boundaries more often\nthan functions do, and they are the names an implementer is likeliest to\ninvent \u2014 a live fan-out died on three exception names imported from a module\nwhose author had not run.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Signature"
         },
         "summary": {
           "anyOf": [
@@ -29,13 +73,49 @@
           ],
           "default": null,
           "title": "Summary"
+        },
+        "raises": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Raises",
+          "type": "array"
         }
       },
       "required": [
-        "id",
+        "name",
         "kind"
       ],
-      "title": "DesignElement",
+      "title": "Export",
+      "type": "object"
+    },
+    "Interface": {
+      "additionalProperties": false,
+      "description": "What one module exports, and what it imports from its siblings.\n\nThis is the contract parallel implementers write against. It is authored by\nthe architect and generated into stubs deterministically, so a module's\ncallers and its author are reading the same names from the same source.",
+      "properties": {
+        "module": {
+          "title": "Module",
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "exports": {
+          "items": {
+            "$ref": "#/$defs/Export"
+          },
+          "title": "Exports",
+          "type": "array"
+        }
+      },
+      "required": [
+        "module"
+      ],
+      "title": "Interface",
       "type": "object"
     },
     "Module": {
@@ -81,6 +161,13 @@
       "title": "Elements",
       "type": "array"
     },
+    "modules": {
+      "items": {
+        "$ref": "#/$defs/Module"
+      },
+      "title": "Modules",
+      "type": "array"
+    },
     "endpoints": {
       "items": {
         "type": "string"
@@ -88,11 +175,11 @@
       "title": "Endpoints",
       "type": "array"
     },
-    "modules": {
+    "interfaces": {
       "items": {
-        "$ref": "#/$defs/Module"
+        "$ref": "#/$defs/Interface"
       },
-      "title": "Modules",
+      "title": "Interfaces",
       "type": "array"
     }
   },
