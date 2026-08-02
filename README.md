@@ -6,7 +6,7 @@ engineering outcome** — a change set plus the evidence needed to approve it.
 > The orchestrator decides *what work happens next, who does it, whether the result is
 > acceptable, and whether a human must sign off* — and records all of it.
 
-**The URL shortener in `src/shortener/` is not the deliverable.** It is the target codebase
+**The URL shortener in `target/` is not the deliverable.** It is the target codebase
 the orchestrator drives through an SDLC, and it exists to make the system falsifiable:
 without a real, running, tested artifact at the end, gate results are unverifiable claims.
 
@@ -14,64 +14,147 @@ without a real, running, tested artifact at the end, gate results are unverifiab
 
 ## Status
 
-Design complete; implementation in progress.
+A greenfield run completed end to end and was accepted on 2026-08-02.
 
 | | |
 | --- | --- |
-| Architecture and decision registry (D1–D22) | ✅ `docs/architecture.md` |
-| Toolchain, verified runnable | ✅ full suite green; `target/` deliberately empty |
-| Orchestrator engine — graph, gates, policy, lineage | 🚧 in progress |
-| Scenario plans — greenfield / brownfield / ambiguous | ✅ `plans/` — one spine, two deltas |
-| Scenario runs, end to end | ⬜ not started |
+| Architecture and decision registry (D1–D25) | ✅ `docs/architecture.md` |
+| Orchestrator engine — graph, gates, policy, lineage | ✅ **497 tests**, deterministic — no test calls a model |
+| Greenfield, end to end | ✅ run `610c782beb9a4ea6bc7c8d06444eb432` — 20 nodes, evidence bundle **RELEASABLE** |
+| Target produced by that run | ✅ 8 modules, ~1,550 lines, **86 tests passing, 93.64% coverage** |
+| Ambiguous | ◐ proven through requirements: 15 ambiguities from one sentence, 5 escalated to a human |
+| Brownfield | ⬜ written and audited against the current engine, **not executed** |
 
-This README describes what runs today. It will grow as the engine lands.
+What live execution found — roughly thirty defects, none visible to the test suite — is in
+[`docs/engineering-summary.md`](docs/engineering-summary.md) §5. It is the most useful
+evidence here.
 
 ---
 
-## Quick start
+## Setup
 
-Requires Python 3.13 and [`uv`](https://docs.astral.sh/uv/).
+Python **3.13 or newer** and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-uv venv --python 3.13
-uv pip install -e ".[dev]"
-
-.venv/bin/pytest                # orchestrator suite
-.venv/bin/pytest target/tests   # target suite (agent-written)
-.venv/bin/ruff check .          # lint (target excluded — it is gated separately)
+uv venv --python 3.13          # create the virtualenv
+uv pip install -e ".[dev]"     # orchestrator + test tooling
 ```
 
-Drive the orchestrator:
+That runs the whole test suite, every stub and replay run, and every read-only command.
+**No API key is needed for any of it.**
+
+To execute real model work — the `agent` and `codeagent` node kinds — add the live extra
+and a credential:
 
 ```bash
-orchestrator preflight                   # validate the plan; refuse to start if a check is missing
-orchestrator run                         # requirement in, stops at the first checkpoint
-orchestrator run --plan plans/brownfield.yaml --requirement requirements/brownfield.md
-orchestrator run --dry-run               # what each node would dispatch, executing nothing
-orchestrator status                      # node by node, with what is blocking
-orchestrator approve <run> <node> --by you
-orchestrator evidence --write            # the reviewable bundle
-orchestrator metrics                     # success rate, retries, MTTR
-orchestrator why design.spec             # trace an artifact to what produced it
-orchestrator retry <run> <node> --by you --why "fixed the generator"
-orchestrator invalidate <run> <node>... --by you --why "the gate was wrong"
-orchestrator rollback <run>              # restore the baseline, then verify the restore
+uv pip install -e ".[dev,live]"
+cp .env.example .env           # then set ANTHROPIC_API_KEY
 ```
 
-No API key is needed for `stub` or `replay` runs — see [`.env.example`](.env.example).
+`.env` holds credentials, paths and the worker switch (`stub` · `replay` · `live`). Model
+and effort are deliberately *not* there: they are per-node fields in the plan graph (D16),
+so a run's cost profile lives in the artifact describing the run.
 
-Serve the target:
+### Verify the install
 
 ```bash
+.venv/bin/pytest                       # 497 passed
+.venv/bin/ruff check .                 # clean
+.venv/bin/orchestrator preflight       # validates the plan and every check it names
+```
+
+`preflight` refuses a plan naming a predicate the engine cannot supply, or a check whose
+parameters a node does not declare — before anything executes.
+
+---
+
+## Run what was already built
+
+```bash
+.venv/bin/pytest target/tests                                    # 86 passed
 cd target && ../.venv/bin/uvicorn shortener.main:app --reload
-curl localhost:8000/health      # → {"status":"ok"}
+curl -i http://127.0.0.1:8000/health
 ```
 
-Run a single test:
+API docs at `http://127.0.0.1:8000/docs` — generated from the Pydantic models, not written.
+
+### Read the completed run
+
+Everything here reads recorded state. Nothing executes, nothing costs anything.
 
 ```bash
-.venv/bin/pytest tests/test_architecture_invariants.py::test_orchestrator_never_imports_the_target
+.venv/bin/orchestrator runs
+.venv/bin/orchestrator status   610c782beb9a4ea6bc7c8d06444eb432   # node by node
+.venv/bin/orchestrator metrics  610c782beb9a4ea6bc7c8d06444eb432   # success rate, retries, MTTR
+.venv/bin/orchestrator evidence 610c782beb9a4ea6bc7c8d06444eb432   # the reviewable bundle
+.venv/bin/orchestrator why design.spec 610c782beb9a4ea6bc7c8d06444eb432
+
+cat runs/610c782beb9a4ea6bc7c8d06444eb432/artifacts/intake.register/v3
 ```
+
+---
+
+## Start a new run
+
+**A run is destructive to its target** — it writes code, tests and documentation into the
+directory its profile names. Point a new run at a *different* target so it cannot overwrite
+the accepted implementation:
+
+```bash
+.venv/bin/orchestrator run \
+  --plan plans/greenfield.yaml \
+  --requirement requirements/greenfield.md \
+  --target config/target.shortener-demo.yaml
+```
+
+Check where it *would* write first — this executes nothing:
+
+```bash
+.venv/bin/orchestrator run --target config/target.shortener-demo.yaml --dry-run
+```
+
+| Profile | Writes to | Use for |
+| --- | --- | --- |
+| `config/target.shortener.yaml` | `target/shortener` | the accepted run — **do not point a new run here** |
+| `config/target.shortener-demo.yaml` | `target/shortener_demo` | a fresh greenfield run |
+| `config/target.ratelimit.yaml` | `target/ratelimit` | the ambiguous scenario |
+
+The target is named in exactly one file. Nothing in `src/orchestrator/` knows what a
+shortener is (D3), so retargeting is a config change, not a code change.
+
+### Watch it, answer it, stop it
+
+A run stops at human checkpoints and exits — it does not hold a terminal. Follow it from a
+second one:
+
+```bash
+.venv/bin/orchestrator watch <run-id> -v                      # nodes, gates, scope denials
+.venv/bin/orchestrator watch <run-id> --decide --by "you"     # ...and answer checkpoints here
+
+.venv/bin/orchestrator approve <run-id> <node> --by "you" --note "why"
+.venv/bin/orchestrator reject  <run-id> <node> --by "you" --note "why"
+.venv/bin/orchestrator stop    <run-id> --by "you" [--force]  # --force kills the driver
+```
+
+Greenfield stops three times: **clarify-with-human** (answer the ambiguities),
+**design-approval** (approve the contract before it is built), **accept** (accept the change
+set against the evidence bundle). A full run takes 60–90 minutes.
+
+### Correcting a run
+
+```bash
+.venv/bin/orchestrator retry      <run> <node> --by you --why "fixed the generator"
+.venv/bin/orchestrator recheck    <run> <node>                # re-run checks, not the work
+.venv/bin/orchestrator invalidate <run> <node>... --by you --why "the gate was wrong"
+.venv/bin/orchestrator rollback   <run>                       # restore the baseline, then verify it
+```
+
+`recheck` exists because an ERROR means the harness failed, not the work — repeating a
+twelve-minute agent session over a missing parameter is the waste that verdict exists to
+prevent.
+
+**Before demonstrating any of this, read [`docs/demo.md`](docs/demo.md)** — what to show,
+in what order, and what will bite you.
 
 ---
 
