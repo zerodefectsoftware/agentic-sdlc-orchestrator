@@ -1018,8 +1018,9 @@ materialisation and is substituted per child at runtime.
 
 ### A.5 The worked greenfield graph
 
-`plans/greenfield.yaml` is the file; it is commented and meant to be read directly rather
-than duplicated here, where a copy would drift. Its shape:
+`plans/greenfield.yaml` in full, below. The table is the index — read it first for the
+shape, then the file for the reasoning, which is carried in its comments. A test asserts
+the two agree with each other and with the plan on disk, so the copy here cannot drift.
 
 | Node | Kind | Stage | Needs | Outputs | Exit gate |
 | --- | --- | --- | --- | --- | --- |
@@ -1054,6 +1055,251 @@ which is the join — no separate barrier construct exists or is needed.
 (nothing ships with an open question), `lineage_complete`, `no_node_in_nonterminal_state`,
 and `no_stale_approvals` (D10 — an approval whose artifact was re-derived after the fact
 does not count).
+
+**The file.** Comments are the argument; the YAML is just where it is written down.
+
+```yaml
+# Greenfield plan graph.
+#
+# The engine is fixed; this file is the SDLC. Adding a stage means editing
+# this file, not the scheduler (D16). See docs/architecture.md Appendix A.
+
+plan: greenfield
+version: 1
+description: Requirement → reviewable change set, from an empty target.
+
+defaults:
+  model: claude-opus-5
+  effort: high
+  retry_budget: 2
+  autonomy: AUTO
+
+nodes:
+
+  # ── Understand ──────────────────────────────────────────────────────────
+  - id: intake
+    kind: agent
+    stage: requirements
+    role: analyst
+    output_schema: schemas/requirement_register.json
+    outputs: [register]              # gates read intake.register
+    effort: medium                    # structured extraction; depth adds little
+    gate:                             # G1
+      all:
+        - predicate: schema_valid
+        - predicate: every_requirement_has_testable_ac
+
+  - id: ambiguity-triage
+    kind: tool                        # policy evaluation, not a judgment call
+    stage: requirements
+    needs: [intake]
+    run: py:orchestrator.policy.triage_ambiguities
+    retry_budget: 0                   # pure function: a second run cannot disagree
+    escalate_when:
+      predicate: has_high_severity_ambiguity
+    on_escalate: clarify-with-human
+    gate:                             # G2 — the policy ran, not that nothing needs a human.
+      all:                            # An open HIGH ambiguity is this node working, and
+                                      # gating on its absence would fail exactly then.
+        - predicate: every_ambiguity_is_disposed_or_escalated
+
+  - id: clarify-with-human
+    kind: human
+    stage: requirements
+    optional: true                    # only instantiated when triage escalates
+    autonomy: APPROVE
+    presents: [intake.artifacts.register]
+
+  - id: normalize-clarification
+    kind: tool
+    stage: requirements
+    needs: [clarify-with-human]
+    optional: true                    # activated with the checkpoint it processes
+    run: py:orchestrator.policy.normalize_clarification
+    params:
+      checkpoint: clarify-with-human
+    inputs: [intake.artifacts.register]
+    outputs: [register]
+    # Without this, clarification is theatre: the run stops, a person answers,
+    # and the answer sits in the audit trail while design works from the same
+    # unresolved register. Re-emitting `intake.register` is also what makes it
+    # stateful — downstream consumers invalidate, bound approvals go stale (D10).
+    gate:                             # G2b
+      all:
+        - "clarification.resolved > 0"
+        - predicate: no_ambiguity_without_disposition
+
+  # ── Design ──────────────────────────────────────────────────────────────
+  - id: design
+    kind: agent
+    stage: design
+    role: architect
+    needs: [ambiguity-triage, normalize-clarification]   # SKIPPED when nothing escalated
+    inputs: [intake.artifacts.register]
+    output_schema: schemas/design.json
+    outputs: [spec, modules]          # gates read design.spec;
+                                      # impl fans out over design.modules
+    gate:                             # G3
+      all:
+        - predicate: contract_is_valid          # a predicate, not an expression:
+                                                # only the artifact holds the contract,
+                                                # and its author cannot vouch for it
+        - predicate: requirement_design_matrix_complete   # both directions
+        - predicate: no_unmapped_design_elements          # catches gold-plating
+
+  - id: design-approval
+    kind: human
+    stage: design
+    needs: [design]
+    autonomy: APPROVE
+    binds_to: [design.artifacts.spec]
+    # binds_to implements D10: if either artifact is re-derived, this
+    # approval reverts to pending and G10 blocks.
+
+  # ── Build ───────────────────────────────────────────────────────────────
+  - id: scaffold
+    kind: derive                      # deterministic generation (D8), no model call
+    stage: implementation
+    needs: [design-approval]
+    inputs: [design.artifacts.spec]   # design-approval is a human node: it
+                                      # produces no artifact to inherit
+    run: py:orchestrator.derive.scaffold_from_design
+    params:
+      root: "{target.root}"
+    outputs: [manifest]
+    write_scope: ["{target.root}/**"]
+    verify:                           # the engine runs these; the node does not
+      - "sh:{target.commands.lint}"
+      - py:orchestrator.gates.imports_resolve
+    gate:                             # G4
+      all:
+        - "imports.resolve == true"
+        - "ruff.exit_code == 0"
+
+  - id: tests-acceptance
+    kind: codeagent
+    stage: verification
+    role: test-author                 # deliberately NOT the implementer (D5)
+    outputs: [suite]                  # gates read tests-acceptance.suite
+    output_files:                     # ...and the agent writes it here
+      suite: "{target.tests_root}/acceptance_suite.json"
+    needs: [scaffold]
+    inputs: [intake.artifacts.register, design.artifacts.spec]
+    write_scope: ["{target.tests_root}/**"]
+    verify:
+      - "sh:{target.commands.test}"   # a code agent cannot report its own red
+    gate:                             # G5 — the RED gate
+      all:
+        - "session.files_written > 0"
+        - "pytest.exit_code != 0"     # must FAIL against the scaffold
+        - predicate: every_ac_has_a_test
+
+  - id: impl
+    kind: codeagent
+    stage: implementation
+    role: implementer
+    needs: [tests-acceptance]
+    inputs: [design.artifacts.spec, intake.artifacts.register]
+    # One author for the whole target, not one per module. A greenfield build
+    # has no interfaces yet: the names modules call each other by are decided
+    # *while* the code is written, so parallel authors agree on them only by
+    # luck. A live run showed exactly that — `links` importing three exception
+    # names from a module whose author had not run.
+    #
+    # The cost is real and accepted: no parallelism in implementation, and the
+    # blast radius is the whole target rather than one directory (D7 is reduced
+    # to the target boundary here). Brownfield keeps the fan-out, where the
+    # interfaces already exist in the codebase being changed. See D23.
+    write_scope: ["{target.root}/**"]
+    freeze_paths: ["{target.tests_root}/**"]   # D6: not the suite judging it
+    params:
+      root: "{target.root}"
+      max_turns: 200          # seven modules is not a one-module job
+      timeout_s: 3600
+    verify:
+      - "sh:{target.commands.lint}"
+      - py:orchestrator.gates.imports_resolve
+    gate:                             # G6
+      all:
+        - "session.files_written > 0"
+        - "ruff.exit_code == 0"
+        - "imports.resolve == true"   # the modules have to import each other
+
+  # ── Verify (parallel, then join) ────────────────────────────────────────
+  - id: tests
+    kind: tool
+    stage: verification
+    needs: [impl]
+    run: "sh:{target.commands.test_cov}"
+    params:
+      coverage_report: coverage.json   # written by the command above
+    verify:
+      - py:orchestrator.gates.report_coverage
+    freeze_paths: ["{target.tests_root}/**"]  # D6: immutable during repair
+    gate:                              # G7 — the GREEN gate
+      all:
+        - "pytest.exit_code == 0"
+        - "coverage.percent >= {target.thresholds.coverage_min}"
+        - predicate: ac_test_matrix_complete
+    on_fail:
+      insert: fix
+      scoped_to: failing_module
+      max_attempts: 2
+      then: escalate
+
+  - id: docs
+    kind: codeagent
+    stage: documentation
+    role: technical-writer
+    outputs: [readme]                 # gates read docs.readme
+    output_files:
+      readme: target/README.md
+    needs: [impl]
+    inputs: [design.artifacts.spec, intake.artifacts.register]
+    effort: medium
+    write_scope: ["target/README.md", "target/docs/**"]
+    gate:                             # G8 — executable documentation
+      all:
+        - "session.files_written > 0"
+        - predicate: setup_steps_execute_in_clean_venv
+        - predicate: documented_endpoints_match_openapi
+
+  - id: security
+    kind: tool
+    stage: verification
+    needs: [impl]
+    run: py:orchestrator.gates.security_scan
+    outputs: [report]                 # gates read security.report
+    autonomy: REVIEW
+    escalate_when:                    # policy overrides the node default
+      predicate: has_high_severity_finding
+    may_waive: false                  # D15: agents never waive findings
+    gate:                             # G9
+      all:
+        - predicate: no_unapproved_high_findings
+
+  # ── Release readiness ───────────────────────────────────────────────────
+  - id: release-readiness
+    kind: derive                      # deterministic by design (D9)
+    stage: release
+    needs: [tests, docs, security]    # sync barrier — needs is the join
+    emits: evidence_bundle            # assembled by the engine: it reads four stores
+    gate:                             # G10
+      all:
+        - predicate: all_upstream_gates_green
+        - predicate: no_unapproved_high_findings
+        - predicate: no_ambiguity_without_disposition   # nothing ships with an open question
+        - predicate: lineage_complete
+        - predicate: no_node_in_nonterminal_state
+        - predicate: no_stale_approvals
+
+  - id: accept
+    kind: human
+    stage: release
+    needs: [release-readiness]
+    autonomy: APPROVE
+    presents: [release-readiness.artifacts.evidence_bundle]
+```
 
 ### A.6 Composition — the brownfield delta
 

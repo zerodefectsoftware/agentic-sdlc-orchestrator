@@ -63,6 +63,27 @@ def test_plan_node_ids_are_unique_and_dependencies_resolve():
                 assert dep in ids, f"{path.name}: {node['id']} needs unknown '{dep}'"
 
 
+def test_appendix_a_quotes_the_real_plan_file():
+    """The doc quotes the plan in full; a quote that drifts is worse than no quote.
+
+    Compared semantically rather than textually, so comment and whitespace edits
+    in either copy are fine — only a difference in what the plan *says* fails.
+    """
+    doc = (REPO / "docs" / "architecture.md").read_text()
+    blocks = [
+        parsed
+        for block in re.findall(r"```yaml\n(.*?)\n```", doc, re.S)
+        if isinstance(parsed := yaml.safe_load(block), dict)
+        and parsed.get("plan") == "greenfield"
+    ]
+    assert len(blocks) == 1, "expected exactly one greenfield plan block in the doc"
+
+    actual = yaml.safe_load((REPO / "plans" / "greenfield.yaml").read_text())
+    assert blocks[0] == actual, (
+        "docs/architecture.md Appendix A has drifted from plans/greenfield.yaml"
+    )
+
+
 def test_appendix_a_walks_every_node_of_the_real_plan():
     """Appendix A tabulates the greenfield graph; a table that drifts is worse than none.
 
