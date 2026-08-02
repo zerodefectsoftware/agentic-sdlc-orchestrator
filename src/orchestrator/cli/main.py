@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -729,6 +730,80 @@ def invalidate(
 def resume(run_id: Annotated[str | None, typer.Argument()] = None) -> None:
     """Continue a run that stopped at a checkpoint."""
     _advance(run_id)
+
+
+@app.command()
+def watch(
+    run_id: Annotated[str | None, typer.Argument()] = None,
+    interval: Annotated[float, typer.Option(help="Seconds between polls")] = 1.0,
+) -> None:
+    """Follow a run as it executes. Open this in a second terminal.
+
+    Reads the run's recorded state and prints each change as it lands: a node
+    starting, a gate's verdict and the checks behind it, an artifact version, a
+    checkpoint opening. Exits when the run reaches a terminal state.
+
+    It is a reader, not a participant — it holds no lock and cannot affect the
+    run it is watching. Every line it prints is state already committed, so what
+    you see is what a reviewer would find in the evidence bundle afterwards.
+    """
+    seen_status: dict[str, str] = {}
+    seen_gates: set[str] = set()
+    seen_artifacts: set[str] = set()
+
+    console.print("[dim]watching — Ctrl-C to stop[/dim]\n")
+    while True:
+        with store.Store().session() as session:
+            run = _resolve(session, run_id)
+            run_id = run.id
+
+            for execution in store.all_nodes(session, run):
+                status = str(execution.status)
+                if seen_status.get(execution.node_id) == status:
+                    continue
+                if execution.node_id in seen_status:
+                    style = STATUS_STYLE.get(status, "white")
+                    console.print(
+                        f"  [{style}]{status:<8}[/{style}] {execution.node_id}"
+                    )
+                seen_status[execution.node_id] = status
+
+                for attempt in execution.attempts:
+                    for record in attempt.gate_records:
+                        if record.id in seen_gates:
+                            continue
+                        seen_gates.add(record.id)
+                        colour = "green" if record.verdict == "pass" else "red"
+                        console.print(
+                            f"    [{colour}]gate {record.verdict}[/{colour}] "
+                            f"{execution.node_id} [dim]({record.evaluator})[/dim]"
+                        )
+                        for check in record.checks:
+                            if check["verdict"] == "pass":
+                                continue
+                            console.print(
+                                f"      [red]{check['verdict']}[/red] {check['check']} "
+                                f"[dim]{str(check.get('detail') or '')[:90]}[/dim]"
+                            )
+
+            for artifact in sorted(run.artifacts, key=lambda a: a.created_at):
+                if artifact.id in seen_artifacts:
+                    continue
+                seen_artifacts.add(artifact.id)
+                console.print(f"    [cyan]artifact[/cyan] {artifact.name}@v{artifact.version}")
+
+            for approval in run.approvals:
+                key = f"approval:{approval.id}:{approval.decision}"
+                if key in seen_artifacts or approval.decision is not Decision.PENDING:
+                    continue
+                seen_artifacts.add(key)
+                console.print(f"  [cyan]awaiting[/cyan] {approval.node_id}")
+
+            if run.status is not RunStatus.RUNNING:
+                console.print(f"\n[bold]{run.status}[/bold] — {run.stop_reason or 'done'}")
+                return
+
+        time.sleep(interval)
 
 
 @app.command()

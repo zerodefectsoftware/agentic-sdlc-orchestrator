@@ -45,11 +45,17 @@ class AppError(Exception):
         code: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
-        raise NotImplementedError
+        super().__init__(message)
+        self.message = message
+        self.details = details
+        if code is not None:
+            # Shadows the class attribute for this instance only, so a caller
+            # can narrow the code without needing a subclass for every variant.
+            self.code = code
 
     def to_envelope(self) -> ErrorEnvelope:
         """Render this error as the response body clients parse."""
-        raise NotImplementedError
+        return ErrorEnvelope(code=self.code, message=self.message, details=self.details)
 
 
 class InvalidURLError(AppError):
@@ -100,7 +106,8 @@ class RateLimitedError(AppError):
         retry_after: float,
         details: dict[str, Any] | None = None,
     ) -> None:
-        raise NotImplementedError
+        super().__init__(message, details=details)
+        self.retry_after = retry_after
 
 
 class StorageError(AppError):

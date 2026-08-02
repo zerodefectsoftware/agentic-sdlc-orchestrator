@@ -139,6 +139,21 @@ class Scheduler:
             # Inputs are resolved on the scheduler's thread; workers run on others.
             material = {node.id: self._inputs(session, run, node) for node in wave}
 
+            # Say what is executing, and commit it, before anything long starts.
+            # Until this existed the whole run was one transaction: no status, no
+            # attempt and no gate record was visible until the process exited, so
+            # a forty-minute run was a black box and every diagnosis had to wait
+            # for it to end. A wave is the natural commit boundary — it is
+            # already the unit the loop records.
+            for node in wave:
+                execution = store.get_node(session, run, node.id)
+                if execution is not None and node.kind not in (
+                    NodeKind.HUMAN,
+                    NodeKind.FANOUT,
+                ):
+                    execution.status = NodeStatus.RUNNING
+            session.commit()
+
             # Every outcome of the wave is recorded, including the ones that
             # arrive after something blocks the run. `_execute` has already run
             # the whole wave — the sessions happened, the files are on disk —
@@ -149,6 +164,7 @@ class Scheduler:
             # already happened.
             for outcome in self._execute(wave, material):
                 self._record(session, run, outcome)
+            session.commit()   # the wave is history now; make it readable
 
         return self._settle(session, run)
 

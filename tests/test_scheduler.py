@@ -12,6 +12,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from orchestrator.engine.loader import load_plan
 from orchestrator.engine.plan import Stage
@@ -21,7 +22,7 @@ from orchestrator.gates.registry import PredicateRegistry
 from orchestrator.lineage import query, recorder
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
-from orchestrator.state.models import Decision, NodeStatus, RunStatus
+from orchestrator.state.models import Decision, NodeStatus, Run, RunStatus
 from orchestrator.workers import StubWorker, WorkerError, WorkerResult, WorkScope
 from orchestrator.workers import stub as scripts
 
@@ -1001,3 +1002,66 @@ def test_every_outcome_of_a_wave_is_recorded_even_after_one_blocks_the_run(sessi
 
     beta = store.get_node(session, run, "beta")
     assert beta.attempts, "beta ran but no attempt was recorded"
+
+
+# --------------------------------------------------------------------------- #
+# a run is observable while it runs
+# --------------------------------------------------------------------------- #
+
+
+def test_each_wave_is_committed_before_the_next_one_starts(db, tmp_path):
+    """The whole run used to be one transaction.
+
+    No status, attempt or gate record was visible until the process exited, so a
+    forty-minute run was a black box and every diagnosis had to wait for it to
+    end. `orchestrator watch` is only possible because a wave commits.
+    """
+    observed: list[str] = []
+
+    def peek(node, inputs, scope):
+        # A *separate* session, exactly like a second terminal would use.
+        with db.session() as other:
+            run = other.scalars(select(Run)).all()[-1]
+            observed.append(
+                f"{node.id}:"
+                + ",".join(
+                    f"{n.node_id}={n.status}"
+                    for n in store.all_nodes(other, run)
+                    if n.status is not NodeStatus.PENDING
+                )
+            )
+        return scripts.passing("make" if node.id == "build" else "pytest")
+
+    worker = StubWorker(default=scripts.passing("make"))
+    worker.run = peek                                   # type: ignore[method-assign]
+
+    with db.session() as session:
+        scheduler = Scheduler(plan_from(tmp_path, LINEAR), worker)
+        run = scheduler.start(
+            session, requirement_path="r.md", target_profile="t.yaml"
+        )
+        scheduler.advance(session, run)
+
+    # While `verify` was executing, `build` was already recorded as passed.
+    assert any("build=passed" in line for line in observed if line.startswith("verify:"))
+
+
+def test_a_node_says_it_is_running_before_the_work_starts(db, tmp_path):
+    """Knowing what finished is not the same as knowing what is happening."""
+    seen: list[str] = []
+
+    def peek(node, inputs, scope):
+        with db.session() as other:
+            run = other.scalars(select(Run)).all()[-1]
+            seen.append(str(store.get_node(other, run, node.id).status))
+        return scripts.passing("make")
+
+    worker = StubWorker(default=scripts.passing("make"))
+    worker.run = peek                                   # type: ignore[method-assign]
+
+    with db.session() as session:
+        scheduler = Scheduler(plan_from(tmp_path, LINEAR), worker)
+        run = scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+        scheduler.advance(session, run)
+
+    assert seen and all(status == "running" for status in seen)
