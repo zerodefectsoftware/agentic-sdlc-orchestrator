@@ -357,38 +357,24 @@ class Scheduler:
         SKIPPED, and passed on the spot. Nothing was implemented, `impl` recorded
         PASSED with no attempts, and verification ran against a tree of stubs.
 
-        Two rules stop that. The expected children are recomputed from the source
-        every time, so a changed decomposition re-materialises. And passing needs
-        every one of them to have actually PASSED — a fanout whose children were
-        skipped has not done its work, whatever the graph shape says.
+        Two rules stop that, and both are evaluated every time rather than once:
+
+        - the expected children come from the source artifact, so a changed
+          decomposition re-materialises and obsolete edges are dropped;
+        - **the fanout passes only when every expected child has PASSED.**
+          Anything else — skipped, errored, never created — is work still to do,
+          so that child is put back to PENDING and the fanout waits again.
+
+        The status a child already carries is never taken as an answer. A name
+        that survives a re-decomposition keeps the status of the run that
+        abandoned it, and six of eight modules stayed SKIPPED from a previous
+        shape that way: two implementers ran, six never did, and the fanout
+        counted all eight as its children.
         """
         expected = self._children_of(session, run, node)
         expected_ids = [child.id for child in expected]
-        recorded = list(self._extra_needs.get(node.id, ()))
 
-        if node.id in self._materialised and recorded == expected_ids:
-            outstanding = [
-                child_id
-                for child_id in expected_ids
-                if (row := store.get_node(session, run, child_id)) is None
-                or row.status is not NodeStatus.PASSED
-            ]
-            if outstanding:
-                execution.status = NodeStatus.FAILED
-                store.finish_run(
-                    session,
-                    run,
-                    status=RunStatus.FAILED,
-                    stop_reason=(
-                        f"'{node.id}' cannot pass: {len(outstanding)} of {len(expected_ids)} "
-                        f"children did not — {', '.join(outstanding[:5])}"
-                    ),
-                )
-            else:
-                execution.status = NodeStatus.PASSED
-            session.flush()
-            return
-
+        outstanding: list[str] = []
         for child in expected:
             self._runtime[child.id] = child
             row = store.get_node(session, run, child.id)
@@ -396,20 +382,22 @@ class Scheduler:
                 store.insert_node(
                     session, run, child.id, str(child.kind), str(child.stage), _config(child)
                 )
-            elif row.status is not NodeStatus.PENDING:
-                # A child whose name survived a re-decomposition still carries the
-                # status of the run that abandoned it. Creating only the *missing*
-                # rows left six of eight modules SKIPPED from a previous shape, so
-                # two implementers ran and six never did — while the fan-out
-                # counted all eight as its children.
+                outstanding.append(child.id)
+            elif row.status is not NodeStatus.PASSED:
                 row.status = NodeStatus.PENDING
+                outstanding.append(child.id)
+
         # Assigned, not appended: re-materialising after a changed decomposition
         # must drop the children that no longer exist, or the fanout waits on
         # work nobody will do.
         self._extra_needs[node.id] = expected_ids
         self._persist_edges(session, run, node.id)
-
         self._materialised.add(node.id)
+
+        if not outstanding:
+            execution.status = NodeStatus.PASSED
+            session.flush()
+            return
         execution.status = NodeStatus.PENDING  # re-enters once its children pass
         session.flush()
 

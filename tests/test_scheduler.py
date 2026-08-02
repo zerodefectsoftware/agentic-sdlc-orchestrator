@@ -727,11 +727,13 @@ def test_a_re_materialised_child_whose_name_survived_is_run_again(
     assert statuses(session, run)["impl:api"] is NodeStatus.PASSED
 
 
-def test_a_fanout_whose_children_did_not_pass_does_not_pass(session, tmp_path):
-    """A fanout whose children were skipped has not done its work.
+def test_a_fanout_never_passes_on_children_that_did_not(session, tmp_path):
+    """The status a child already carries is never taken as an answer.
 
-    This is the check that would have caught it at the node instead of two
-    stages later, as a pytest failure nobody could attribute.
+    A fanout passes only when every expected child has PASSED. Anything else —
+    skipped, errored, never created — is work still to do, so the child goes
+    back to PENDING and the fanout waits again. Reading a stale SKIPPED as
+    "done" is how a node that did nothing recorded success.
     """
     worker = StubWorker(
         {"design": scripts.passing("agent", **{"design.modules": MODULES})},
@@ -741,18 +743,22 @@ def test_a_fanout_whose_children_did_not_pass_does_not_pass(session, tmp_path):
     scheduler = fanout_scheduler(plan, worker, tmp_path)
     run = scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
     scheduler.advance(session, run)
+    assert statuses(session, run)["impl"] is NodeStatus.PASSED
 
-    # Withdraw the work the children did, leaving the shape intact.
+    # Withdraw the work the children did, leaving the graph shape intact.
     for child in ("impl:api", "impl:storage"):
         store.get_node(session, run, child).status = NodeStatus.SKIPPED
     store.get_node(session, run, "impl").status = NodeStatus.PENDING
     run.status = RunStatus.RUNNING
     session.flush()
 
+    before = list(worker.calls)
     scheduler.advance(session, run)
 
-    assert statuses(session, run)["impl"] is NodeStatus.FAILED
-    assert "children did not" in run.stop_reason
+    # Re-run, not waved through: the fanout passes again only because they did.
+    assert worker.calls[len(before):].count("impl:api") == 1
+    assert statuses(session, run)["impl:api"] is NodeStatus.PASSED
+    assert statuses(session, run)["impl"] is NodeStatus.PASSED
 
 
 def test_a_fanout_whose_source_was_never_produced_fails_loudly(session, tmp_path):
