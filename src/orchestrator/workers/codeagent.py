@@ -31,10 +31,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from orchestrator.config import get_settings
 from orchestrator.engine.plan import Node, NodeKind
 from orchestrator.gates.facts import Fact, FactSource
-from orchestrator.workers.agent import render_inputs
+from orchestrator.workers.agent import project, render_inputs, resolve_schema
 from orchestrator.workers.base import (
     ProducedArtifact,
     WorkerError,
@@ -424,7 +426,43 @@ class CodeAgentWorker:
                     f"session did not write. The role prompt has to say where it goes."
                 )
             produced.append(ProducedArtifact(f"{node.id}.{output}", path.read_text()))
-        return tuple(produced)
+
+        return tuple(produced) + self._projected(node, produced)
+
+    def _projected(
+        self, node: Node, produced: list[ProducedArtifact]
+    ) -> tuple[ProducedArtifact, ...]:
+        """Split a schema-constrained output file into the artifacts the plan declares.
+
+        A code agent that also authors a structured artifact should be held to
+        the same contract an `agent` node is: the file is validated against
+        `output_schema` and projected by the same rule, so `outputs: [spec,
+        modules]` yields both from one file rather than asking the session to
+        write the same decisions twice and keep the copies agreeing.
+
+        Without this, making a node write code *and* emit structure meant
+        choosing between schema validation and a single source of truth.
+        """
+        if not node.output_schema or not produced:
+            return ()
+
+        schema = resolve_schema(node)
+        try:
+            parsed = schema.model_validate_json(produced[0].content)
+        except ValidationError as exc:
+            raise WorkerError(
+                f"'{node.id}' wrote {list(node.output_files.values())[0]}, which does not "
+                f"match {schema.__name__}: {exc.error_count()} problems, first at "
+                f"{'.'.join(str(p) for p in exc.errors()[0]['loc']) or '<root>'} — "
+                f"{exc.errors()[0]['msg']}"
+            ) from exc
+
+        written = {artifact.name for artifact in produced}
+        return tuple(
+            artifact
+            for artifact in project(node, parsed)
+            if artifact.name not in written      # the file itself is already recorded
+        )
 
     def _changeset(self, node: Node, guard: ScopeGuard, report: str = "") -> ProducedArtifact:
         """A manifest of what this node changed, what it was stopped from

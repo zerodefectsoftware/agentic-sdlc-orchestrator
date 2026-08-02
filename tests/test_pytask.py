@@ -24,10 +24,14 @@ from orchestrator.artifacts import (
     RequirementRegister,
     Severity,
 )
-from orchestrator.derive import scaffold_from_design
+from orchestrator.derive import verify_target_matches_contract
 from orchestrator.derive.scaffold import ContractError
 from orchestrator.engine.plan import Node
-from orchestrator.gates.checks import imports_resolve, report_coverage
+from orchestrator.gates.checks import (
+    imports_resolve,
+    report_coverage,
+    stubs_are_unimplemented,
+)
 from orchestrator.gates.facts import FactSource
 from orchestrator.gates.security import security_scan
 from orchestrator.policy.triage import triage_ambiguities
@@ -40,8 +44,9 @@ def node(**overrides) -> Node:
         "id": "scaffold",
         "kind": "derive",
         "stage": "implementation",
-        "run": "py:orchestrator.derive.scaffold_from_design",
+        "run": "py:orchestrator.derive.verify_target_matches_contract",
         "write_scope": ["target/shortener/**"],
+        "params": {"root": "target/shortener"},
     }
     payload.update(overrides)
     return Node.model_validate(payload)
@@ -50,8 +55,9 @@ def node(**overrides) -> Node:
 SCOPE = WorkScope(allowed=("target/shortener/**",))
 
 
-def task(inputs=None, *, cwd=Path("."), scope=SCOPE) -> Task:
-    return Task(node=node(), inputs=inputs or {}, scope=scope, cwd=cwd)
+def task(inputs=None, *, cwd=Path("."), scope=SCOPE, params=None) -> Task:
+    built = node(params=params) if params else node()
+    return Task(node=built, inputs=inputs or {}, scope=scope, cwd=cwd)
 
 
 # --------------------------------------------------------------------------- #
@@ -89,15 +95,23 @@ def test_facts_are_stamped_derived_by_the_worker(tmp_path):
         node(), {"design.spec": design.model_dump_json()}, SCOPE
     )
 
-    assert result.facts["scaffold.modules"].source is FactSource.DERIVED
+    assert result.facts["contract.modules"].source is FactSource.DERIVED
     assert all(fact.source is not FactSource.AGENT for fact in result.facts.values())
 
 
 def test_files_are_written_only_where_the_scope_permits(tmp_path):
-    design = Design(modules=[Module(name="api", path="api")])
-    PyWorker(cwd=tmp_path).run(node(), {"design.spec": design.model_dump_json()}, SCOPE)
+    import orchestrator.derive.scaffold as scaffold_module
 
-    assert (tmp_path / "target/shortener/api/__init__.py").exists()
+    scaffold_module.inside = lambda task: TaskOutput(
+        files={"target/shortener/api/__init__.py": ""}
+    )
+    try:
+        PyWorker(cwd=tmp_path).run(
+            node(run="py:orchestrator.derive.scaffold.inside"), {}, SCOPE
+        )
+        assert (tmp_path / "target/shortener/api/__init__.py").exists()
+    finally:
+        del scaffold_module.inside
 
 
 def test_a_task_writing_outside_its_scope_is_refused(tmp_path):
@@ -148,7 +162,7 @@ def test_the_command_worker_routes_by_scheme(tmp_path):
     design = Design(modules=[])
     worker = CommandWorker(python=PyWorker(cwd=tmp_path))
     result = worker.run(node(), {"design.spec": design.model_dump_json()}, SCOPE)
-    assert "scaffold.modules" in result.facts
+    assert "contract.modules" in result.facts
 
 
 def test_a_node_with_no_command_is_reported_not_guessed():
@@ -208,47 +222,89 @@ def test_a_clean_target_produces_an_empty_report(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# the scaffold derivation
+# the architect may declare, never implement (D24)
 # --------------------------------------------------------------------------- #
 
 
-def test_the_scaffold_derives_a_package_per_module():
-    design = Design(
-        modules=[Module(name="api", path="api", responsibility="HTTP surface")],
-        elements=[DesignElement(id="E1", kind="module", summary="api", satisfies=["R1"])],
+def stub_check(tmp_path, **modules: str) -> Task:
+    root = tmp_path / "target" / "shortener"
+    for name, body in modules.items():
+        package = root / name
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "__init__.py").write_text(body)
+    return Task(
+        node=node(
+            run="py:orchestrator.gates.stubs_are_unimplemented",
+            params={"root": "target/shortener"},
+        ),
+        inputs={},
+        scope=WorkScope(),
+        cwd=tmp_path,
     )
-    output = scaffold_from_design(task({"design.spec": design.model_dump_json()}))
-
-    body = output.files["target/shortener/api/__init__.py"]
-    assert "HTTP surface" in body
-    assert "R1" in body            # traceability survives into the generated stub
-    assert "Implementation belongs" in body   # it is a stub, not an implementation
 
 
-def test_the_package_root_comes_from_the_scope_not_a_constant():
-    """Nothing here knows the target is a URL shortener (D3)."""
-    design = Design(modules=[Module(name="core", path="core")])
-    elsewhere = WorkScope(allowed=("target/other/**",))
-    output = scaffold_from_design(
-        task({"design.spec": design.model_dump_json()}, scope=elsewhere)
+def test_declared_stubs_pass(tmp_path):
+    body = (
+        "def resolve(code: str) -> str:\n"
+        '    """Resolve a code."""\n'
+        "    raise NotImplementedError\n"
     )
-    assert "target/other/core/__init__.py" in output.files
+    output = stubs_are_unimplemented(stub_check(tmp_path, links=body))
+    assert output.facts["stubs.implemented"] == 0
+    assert output.facts["stubs.total"] == 1
 
 
-def test_the_manifest_lists_what_was_generated():
-    design = Design(modules=[Module(name="api", path="api")])
-    output = scaffold_from_design(task({"design.spec": design.model_dump_json()}))
-    assert "target/shortener/api/__init__.py" in output.artifacts["scaffold.manifest"]
+@pytest.mark.parametrize(
+    "body",
+    [
+        "def resolve(code: str) -> str:\n    return code\n",
+        "def resolve(code: str) -> str:\n    x = 1\n    raise NotImplementedError\n",
+        "def resolve(code: str) -> str:\n    raise ValueError('nope')\n",
+        "def resolve(code: str) -> str:\n    pass\n",
+    ],
+)
+def test_an_implemented_body_is_caught(tmp_path, body):
+    """A model told to write stubs will eventually write one that works.
+
+    Every one of these lints clean and imports clean — only parsing tells them
+    apart from a declaration.
+    """
+    output = stubs_are_unimplemented(stub_check(tmp_path, links=body))
+    assert output.facts["stubs.implemented"] == 1
+    assert "links" in output.facts["stubs.offenders"][0]
 
 
-def test_scaffolding_a_design_with_no_modules_still_makes_the_package():
-    output = scaffold_from_design(task({"design.spec": Design().model_dump_json()}))
-    assert list(output.files) == ["target/shortener/__init__.py"]
-    assert json.loads("{}") == {}  # sanity: the artifact bodies are plain text, not JSON
+def test_one_implemented_function_among_many_stubs_is_still_caught(tmp_path):
+    """Not 'the file mentions NotImplementedError' — that passes for 9 of 10."""
+    stubbed = "def a() -> None:\n    raise NotImplementedError\n"
+    body = stubbed + "\n\ndef b() -> int:\n    return 2\n" + "\n" + stubbed.replace("a(", "c(")
+    output = stubs_are_unimplemented(stub_check(tmp_path, links=body))
+    assert output.facts["stubs.implemented"] == 1
+    assert output.facts["stubs.total"] == 2
+
+
+def test_methods_are_checked_too(tmp_path):
+    body = (
+        "class Repo:\n"
+        "    def get(self, code: str) -> str:\n"
+        "        return code\n"
+    )
+    output = stubs_are_unimplemented(stub_check(tmp_path, storage=body))
+    assert output.facts["stubs.implemented"] == 1
+
+
+def test_an_ellipsis_before_the_raise_is_still_a_stub(tmp_path):
+    body = "def resolve() -> None:\n    ...\n    raise NotImplementedError\n"
+    assert stubs_are_unimplemented(stub_check(tmp_path, links=body)).facts["stubs.implemented"] == 0
+
+
+def test_a_file_that_does_not_parse_is_an_error_not_a_pass(tmp_path):
+    with pytest.raises(WorkerError, match="does not parse"):
+        stubs_are_unimplemented(stub_check(tmp_path, links="def broken(\n"))
 
 
 # --------------------------------------------------------------------------- #
-# the contract the fan-out writes against (D24)
+# auditing a target against its contract (D24)
 # --------------------------------------------------------------------------- #
 
 
@@ -256,6 +312,7 @@ def contracted() -> Design:
     """Two modules where one calls the other — the shape that used to break."""
     return Design(
         modules=[Module(name="errors", path="errors"), Module(name="links", path="links")],
+        elements=[DesignElement(id="E1", kind="module", summary="errors", satisfies=["R1"])],
         interfaces=[
             Interface(
                 module="errors",
@@ -272,7 +329,6 @@ def contracted() -> Design:
                         name="resolve",
                         kind="function",
                         signature="(code: str) -> str",
-                        summary="resolve a code to its long URL",
                         raises=["LinkNotFound", "LinkExpired"],
                     )
                 ],
@@ -281,59 +337,64 @@ def contracted() -> Design:
     )
 
 
-def test_every_promised_name_exists_before_anyone_implements_it():
-    """The failure D24 fixes: `links` imported three names `errors` never defined."""
-    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
-
-    errors = output.files["target/shortener/errors/__init__.py"]
-    assert "class LinkNotFound(Exception):" in errors
-    assert "class LinkExpired(Exception):" in errors
-
-    links = output.files["target/shortener/links/__init__.py"]
-    assert "def resolve(code: str) -> str:" in links
-    assert "raise NotImplementedError" in links
-
-
-def test_the_generated_stubs_are_valid_python():
-    """A signature is authored text that becomes code; unparseable is not a stub."""
-    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
-    for path, body in output.files.items():
-        compile(body, path, "exec")
+def wrote(tmp_path, **modules: str) -> Task:
+    """Lay out a target the way an architect would have written it."""
+    root = tmp_path / "target" / "shortener"
+    for name, body in modules.items():
+        package = root / name
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "__init__.py").write_text(body)
+    return task(
+        {"design.spec": contracted().model_dump_json()},
+        cwd=tmp_path,
+        params={"root": "target/shortener"},
+    )
 
 
-def test_a_stub_declares_what_it_raises_and_who_it_depends_on():
-    """Both are contract, and both are what a caller has to know in advance."""
-    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
-    links = output.files["target/shortener/links/__init__.py"]
-    assert "Depends on: errors" in links
-    assert "LinkNotFound" in links and "LinkExpired" in links
+KEPT = {
+    "errors": (
+        "class LinkNotFound(Exception):\n    pass\n\n\n"
+        "class LinkExpired(Exception):\n    pass\n"
+    ),
+    "links": "def resolve(code: str) -> str:\n    raise NotImplementedError\n",
+}
 
 
-def test_the_generator_cannot_implement_the_product():
-    """Why this is a derivation, not an agent (D8): there is no body to write.
+def test_a_kept_contract_passes(tmp_path):
+    output = verify_target_matches_contract(wrote(tmp_path, **KEPT))
+    assert output.facts["contract.broken"] == 0
+    assert output.facts["contract.kept"] == 3
+    assert output.facts["contract.exports"] == 3
 
-    A code agent told to write stubs will eventually write one that works. A
-    generator has no such option, which is why the 'did you cheat' gate this
-    design first proposed turned out to be unnecessary.
+
+def test_a_promised_name_the_code_never_defines_is_caught(tmp_path):
+    """The cost of letting the architect write Python: its two artifacts can disagree.
+
+    Exactly the original failure, one stage earlier — `links` calls a name
+    `errors` does not define. Caught before seven implementers write against it.
     """
-    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
-    bodies = "\n".join(output.files.values())
-    assert bodies.count("raise NotImplementedError") == 1   # the one function
-    assert "return " not in bodies
+    thinner = dict(KEPT, errors="class LinkNotFound(Exception):\n    pass\n")
+    output = verify_target_matches_contract(wrote(tmp_path, **thinner))
+
+    assert output.facts["contract.broken"] == 1
+    assert "errors.LinkExpired (exception)" in output.facts["contract.missing"]
 
 
-def test_the_exports_fact_is_what_the_gate_counts():
-    output = scaffold_from_design(task({"design.spec": contracted().model_dump_json()}))
-    assert output.facts["scaffold.exports"] == 3
-    assert output.facts["scaffold.interfaces"] == 2
+def test_a_re_exported_name_counts_as_defined(tmp_path):
+    """A package whose __init__ imports a name does define it for its callers."""
+    split = dict(KEPT, errors="from target.shortener.errors.kinds import (\n"
+                              "    LinkExpired,\n    LinkNotFound,\n)\n")
+    output = verify_target_matches_contract(wrote(tmp_path, **split))
+    assert output.facts["contract.broken"] == 0
 
 
-def test_a_circular_contract_is_refused_before_any_code_is_written():
-    """Parallel implementation is only safe over a DAG.
+def test_an_empty_package_breaks_every_promise_it_made(tmp_path):
+    output = verify_target_matches_contract(wrote(tmp_path, errors="", links=KEPT["links"]))
+    assert output.facts["contract.broken"] == 2
 
-    Two modules that must change together cannot both be written against a
-    contract that is settled — neither one's is.
-    """
+
+def test_a_circular_contract_is_refused_before_implementation(tmp_path):
+    """Parallel implementation is only safe over a DAG."""
     design = Design(
         modules=[Module(name="a", path="a"), Module(name="b", path="b")],
         interfaces=[
@@ -341,35 +402,27 @@ def test_a_circular_contract_is_refused_before_any_code_is_written():
             Interface(module="b", depends_on=["a"], exports=[Export(name="g", kind="function")]),
         ],
     )
-    with pytest.raises(ContractError, match="acyclic"):
-        scaffold_from_design(task({"design.spec": design.model_dump_json()}))
-
-
-def test_a_signature_that_is_not_a_signature_names_the_export_that_broke_it():
-    """The useful failure identifies the contract entry, not the generated file."""
-    design = Design(
-        modules=[Module(name="links", path="links")],
-        interfaces=[
-            Interface(
-                module="links",
-                exports=[Export(name="resolve", kind="function", signature="code -> str")],
-            )
-        ],
+    probe = task(
+        {"design.spec": design.model_dump_json()},
+        cwd=tmp_path,
+        params={"root": "target/shortener"},
     )
-    with pytest.raises(ContractError, match="links.resolve"):
-        scaffold_from_design(task({"design.spec": design.model_dump_json()}))
+    with pytest.raises(ContractError, match="acyclic"):
+        verify_target_matches_contract(probe)
 
 
-def test_a_module_without_an_interface_still_gets_a_package():
-    """The graph shape must not depend on how complete the contract is.
+def test_the_manifest_records_what_was_audited(tmp_path):
+    output = verify_target_matches_contract(wrote(tmp_path, **KEPT))
+    assert "target/shortener/errors" in output.artifacts["scaffold.manifest"]
 
-    The gate rejects an uncontracted module; the generator still has to produce
-    a tree that imports, or the gate never gets to say so.
-    """
-    design = Design(modules=[Module(name="orphan", path="orphan")])
-    output = scaffold_from_design(task({"design.spec": design.model_dump_json()}))
-    assert "target/shortener/orphan/__init__.py" in output.files
-    assert output.facts["scaffold.exports"] == 0
+
+def test_the_audit_never_imports_the_target(tmp_path):
+    """Parsed, not imported: a module with an import-time side effect would run
+    it inside the orchestrator. Whether it *can* be imported is a separate check,
+    in a subprocess, which is the right place for that question."""
+    exploding = dict(KEPT, links=KEPT["links"] + "\nraise SystemExit('imported')\n")
+    output = verify_target_matches_contract(wrote(tmp_path, **exploding))
+    assert output.facts["contract.broken"] == 0
 
 
 # --------------------------------------------------------------------------- #

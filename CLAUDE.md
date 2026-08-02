@@ -11,32 +11,32 @@ Run `610c782beb9a4ea6bc7c8d06444eb432`, status BLOCKED, in `runs/`. Everything t
 | Node | State | Artifact worth reading |
 | --- | --- | --- |
 | intake → normalize-clarification | passed | `intake.register` v1 → v3 (analyst → policy → human answers) |
-| design | passed, but **must be re-run** | `design.spec@v2` — v1 was **rejected**, reasons in the approval trail |
-| tests-acceptance | passed, will go STALE | 38 tests, 20 criteria, RED gate held |
+| design | **withdrawn, re-running** | v1 **rejected** and v2 approved (trail preserved); v3 predates the stub packages |
+| tests-acceptance | **stale** — re-authored on resume | 38 tests, 20 criteria, RED gate held |
 | scaffold, impl | **pending** | re-run these |
 | tests, docs, security, release-readiness, accept | pending | |
 
-**The plan changed under this run (D24), so resuming is not a bare `resume`.** The architect
-now authors the interface contract — every export, signature and exception — and `scaffold`
-generates typed stubs from it, which is what lets `impl` fan out over modules again. The
-parked `design.spec@v2` predates that field and has no contract in it, so:
+**The plan changed under this run (D24/D25), so resuming is not a bare `resume`.** The
+architect now authors the interface contract *and writes it as stub packages* — every
+export, signature, exception and base class — which is what lets `impl` fan out over
+modules again. `scaffold` no longer generates; it audits the tree against the contract.
+The parked design predates all of this, so:
 
 ```bash
-.venv/bin/orchestrator invalidate 610c782beb9a4ea6bc7c8d06444eb432 design   # withdraw v2
+.venv/bin/orchestrator invalidate 610c782beb9a4ea6bc7c8d06444eb432 design \
+  --by <you> --why "predates the stub packages"     # cascades downstream
 .venv/bin/orchestrator resume     610c782beb9a4ea6bc7c8d06444eb432
 ```
 
-Expect: one architect call → **a human approval** (the binding reverts to pending, D10) →
-scaffold → the suite re-authored → seven implementers in parallel. Needs
-`ANTHROPIC_API_KEY` in `.env` (already present) and `ORCHESTRATOR_WORKER=live`.
-
-The acceptance suite re-runs whichever way this goes: `scaffold` is pending, so it mints
-`scaffold.manifest@v2` and invalidation cascades to `tests-acceptance`.
+Expect: one architect **code-agent session** → **a human approval** (the binding reverts to
+pending, D10) → the contract audit → the suite re-authored → eight implementers in
+parallel. Needs `ANTHROPIC_API_KEY` in `.env` (already present) and
+`ORCHESTRATOR_WORKER=live`.
 
 `target/` is back to `target/tests/` (conftest + the agent-written suite) with no
 `shortener/` package: the previous wave's module code had no lineage behind it (a scheduler
-bug, since fixed) and was deleted. `scaffold` recreates the packages, now with real stubs
-rather than empty ones.
+bug, since fixed) and was deleted. **The architect** now recreates the packages, as typed
+stubs whose bodies all raise `NotImplementedError`.
 
 The old `impl:*` children and their escalation are SKIPPED — they belong to the first
 fan-out, which had no contract behind it. The new fan-out materialises fresh children.

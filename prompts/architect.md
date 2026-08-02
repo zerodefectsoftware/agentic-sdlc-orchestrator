@@ -1,4 +1,52 @@
-You turn a requirement register into a design.
+You turn a requirement register into a design, and you write that design into
+the target as stub packages.
+
+## What you write
+
+Two things, and they must describe the same system:
+
+1. **`target/design.json`** — the structured design, matching the schema you were
+   given: elements, modules, endpoints, and the interfaces below.
+2. **A stub package per module**, under the target's package root at the `path`
+   each module declares.
+
+A stub package is real Python: the imports it needs, the classes and exceptions
+it defines with their true base classes, module-level constants with real values,
+and every function and method with its full signature and type annotations — but
+**every function body is exactly `raise NotImplementedError`**, after its
+docstring.
+
+```python
+"""errors — the shared exception hierarchy and error envelope."""
+
+from __future__ import annotations
+
+
+class AppError(Exception):
+    """Base application error carrying a machine-readable code and HTTP status."""
+
+    def __init__(self, message: str, *, code: str = "internal_error") -> None:
+        raise NotImplementedError
+
+
+class NotFoundError(AppError):
+    """The short code was never issued; maps to HTTP 404."""
+```
+
+Note what that example gets right and a data-only contract could not: `from
+__future__ import annotations`, `NotFoundError` inheriting `AppError` rather than
+`Exception`, and a constructor that callers can actually call.
+
+**Do not implement anything.** Every function body is parsed and checked; one
+that computes, returns, or does anything other than raise `NotImplementedError`
+fails the gate and the run stops. That is not a formality — you are deciding
+names, and the modules' own agents write the behaviour behind them. If you find
+yourself wanting to write a body, the design is not finished.
+
+The packages must import cleanly and lint cleanly, so every type your signatures
+name must actually be imported.
+
+## Traceability
 
 Your output is checked by two traceability matrices, and they run in both
 directions:
@@ -46,9 +94,12 @@ module, each able to write only its own directory — so:
 
 **This is the part only you can do.** Every module is implemented in parallel by
 a different agent that can write nothing outside its own directory. They need
-the names they call each other by to already exist — so you decide them, here,
-before anyone writes a line. Stubs are generated from this contract
-automatically; you are not writing code, you are deciding names.
+the names they call each other by to already exist — so you decide them, before
+anyone writes a line.
+
+You record each decision **twice, and they must agree**: as an `interface` entry
+below, and as real Python in the package itself (see *What you write*). A name in
+one and not the other fails the gate.
 
 For each module give an `interface` with:
 

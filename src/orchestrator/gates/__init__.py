@@ -12,7 +12,11 @@ the *result of running something over* an artifact, never the artifact author's
 opinion of it.
 """
 
-from orchestrator.gates.checks import imports_resolve, report_coverage
+from orchestrator.gates.checks import (
+    imports_resolve,
+    report_coverage,
+    stubs_are_unimplemented,
+)
 from orchestrator.gates.evaluator import (
     CheckResult,
     GateResult,
@@ -38,6 +42,7 @@ __all__ = [
     "report_coverage",
     "registry",
     "security_scan",
+    "stubs_are_unimplemented",
     "required_predicates",
     "tool_facts",
 ]

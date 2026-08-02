@@ -1,7 +1,8 @@
 # The architect owns the contracts
 
-**Status:** accepted and implemented, 2026-08-02. Registered as **D24**, superseding D23.
-This document is the reasoning; `docs/architecture.md` §9 holds the decision.
+**Status:** accepted and implemented, 2026-08-02. Registered as **D24** and **D25**,
+superseding D23. This document is the reasoning; `docs/architecture.md` §9 holds the
+decisions.
 
 ---
 
@@ -45,41 +46,55 @@ cost.
 
 | Role | Decides | Writes |
 | --- | --- | --- |
-| **Architect** | Module boundaries **and every name crossing them** | Nothing — it has no filesystem |
-| **`scaffold`** | Nothing | Every stub, generated from the contract |
+| **Architect** | Module boundaries **and every name crossing them** | The stub packages, and the contract describing them |
+| **`scaffold`** | Nothing | Nothing — it audits the code against the contract |
 | **Implementer** | Nothing that crosses a boundary | One module's bodies |
 
 ---
 
-## Why the architect does not write the stubs
+## Why the architect writes the stubs
 
-The alternative — making `design` a code agent with write access to every package — was
-considered and rejected.
+The alternative — the architect emits a JSON contract and the engine generates stubs from
+it — was **built first, and rejected on evidence**. It is the better design in principle:
+one source of truth, and a generator has no ability to write a working body, so "the
+architect must not implement the product" becomes structurally impossible rather than a rule
+you enforce.
 
-| | Architect writes files | **Engine generates from contract** |
+It failed on contact with the first real contract. Generating Python from data means the
+data must encode Python:
+
+| What the stubs needed | What the schema had | Result |
 | --- | --- | --- |
-| Stub can disagree with the contract | possible | impossible — one source |
-| Can accidentally implement the product | yes, needs a gate to prevent it | **no such option** |
-| Cost | a code-agent session | free |
+| `from datetime import datetime`, `from fastapi import FastAPI` | no imports field | 13 undefined names |
+| `NotFoundError(AppError)` — a 7-member hierarchy with constructors | no base class, and exception constructors dropped | every exception became bare `class X(Exception)` |
+| `ALPHABET = "0-9A-Za-z"`, `app = create_app()` | only `kind: type` | both became `= object`; the ASGI entry point *was* the literal `object` |
 
-The third row is the argument. A code agent told to write stubs will eventually write one
-that works, and the gate to stop it ("every body is unimplemented") is a check you have to
-remember to keep. A generator has no body to write. The role boundary stops being policed
-and becomes structural.
+23 lint errors, so the scaffold gate would have blocked the run. Each is a one-field fix —
+and that is the argument against it. Three appeared in the first contract, and the fourth
+(decorators? dataclass fields? generics?) costs another schema change and another architect
+run to discover. An architect writing Python needs none of them.
 
-The architect still decides every name. It just does not type them.
+**What that costs, and how it is bounded.** Both of the generator's advantages are
+recoverable by checking rather than by construction:
 
----
+| Risk | Check | Where |
+| --- | --- | --- |
+| The architect implements the product | every function body must parse as `raise NotImplementedError` | `design` gate, AST |
+| The stubs and the contract disagree | every promised name must exist in the module that promised it | `scaffold` gate |
+
+Both are deterministic, run by a non-producer, and cheaper than the schema chase they
+replace. The honest difference: these are rules that must be kept, where the generator had
+states that could not occur.
 
 ## What was built
 
 | Piece | Change |
 | --- | --- |
 | Schema | `Design` gains `interfaces` — per module: `depends_on`, and `exports` of `name`, `kind`, `signature` (annotated), `raises` |
-| `design` node | Emits `interfaces` alongside `spec` and `modules`. Still an `agent`, still no filesystem |
-| `design` gate | Adds `every_module_has_an_interface` and `module_dependencies_are_acyclic` |
-| `scaffold` | Generates typed stubs from the contract instead of empty packages. Refuses a cycle or an unparseable signature, naming the export that broke it |
-| `scaffold` gate | Adds `scaffold.exports > 0` — empty packages are the state that made the fan-out unsafe, and it used to pass |
+| `design` node | Now a `codeagent`: writes the stub packages **and** `target/design.json`. The engine validates that file against the schema and projects `spec`/`modules`/`interfaces` from it, so one file stays one source of truth |
+| `design` gate | Adds `every_module_has_an_interface`, `module_dependencies_are_acyclic`, lint, imports resolve, and `stubs.implemented == 0` |
+| `scaffold` | No longer generates. Audits the tree against the contract: every promised name must be defined by the module that promised it. Parses rather than imports — the target is the thing under scrutiny |
+| `scaffold` gate | `contract.broken == 0`, and `contract.exports > 0` — a contract promising nothing is what the first fan-out had to agree on |
 | `impl` | Back to a fan-out, one code agent per module, `max_turns: 60` each |
 | Per-module gate | Adds `imports.resolve` — newly meaningful, because stubs mean a module's imports resolve at its own gate rather than two nodes later |
 | Prompts | The architect authors the contract; the implementer honours it and **escalates** rather than editing a sibling |
@@ -113,9 +128,9 @@ isolation, and the whole suite runs once at the join:
 | lint · imports resolve | yes | — |
 | the 38-test acceptance suite | no | yes — the existing `tests` node |
 
-Types are in the contract and in the generated stubs, but **there is no type-checking gate**
-— that would need a checker this project does not depend on. The annotations are contract
-for a human and an agent to read, not a machine-enforced constraint.
+Types are in the contract and in the stubs, but **there is no type-checking gate** — that
+would need a checker this project does not depend on. The annotations are contract for a
+human and an agent to read, not a machine-enforced constraint.
 
 ---
 

@@ -1,58 +1,38 @@
-"""Scaffolding a target from its design.
+"""Checking a target against the contract its architect declared.
 
-Turns the architect's interface contract into importable, typed stubs: one
-package per module, every promised name present, every body unimplemented.
+The architect writes both: the stub packages, and the structured contract that
+describes them (D24). Two artifacts from one author can disagree — that is the
+cost of letting it write Python instead of generating Python from data, and this
+is what makes the cost bounded.
 
-**Why this is a derivation and not an agent (D8, D24).** The names modules call
-each other by have to be decided once, by someone with authority over all of
-them, *before* anyone writes a body — a live fan-out died on three exception
-names invented by a module that did not own them. The architect decides them;
-this generates them. Generating rather than writing them is what makes the stub
-and the contract impossible to disagree: there is no second author to disagree
-with, and a generator cannot accidentally implement the product.
+**Why the architect writes code at all.** Generating stubs from a JSON contract
+means encoding Python in the schema, and the first real contract needed three
+constructs it did not have: imports for the types its signatures named, base
+classes for an exception hierarchy, and module-level constants that `kind: type`
+turned into `= object`. Each is a schema field and a re-run to discover the next
+one. An architect writing Python needs none of them; it needs this check instead.
 
-A module with no interface still gets a package, so the graph shape never
-depends on how complete the contract is.
+So the derivation moved from *generating* the tree to *auditing* it: every name
+the contract promises must exist in the module that promised it. A promise the
+code does not keep is caught here, before seven implementers write against it.
 """
 
 from __future__ import annotations
 
-import keyword
-import re
-import textwrap
+import ast
+from pathlib import Path
 
-from orchestrator.artifacts import Design, Export, Interface
+from orchestrator.artifacts import Design
 from orchestrator.workers.pytask import Task, TaskOutput
-
-HEADER = (
-    '"""{title}\n\n{body}\n\n'
-    "Generated from the design contract. Implementation belongs to the module's own node.\n"
-    '"""\n'
-)
-
-# Derived code is judged by the same lint gate as written code, so it has to
-# satisfy it. A module responsibility is prose an architect wrote to a length
-# nobody constrained — pasted onto one line it blew the line-length rule, and
-# the scaffold gate then failed deterministically, forever, on the generator's
-# own output rather than on anything an agent did.
-LINE_LENGTH = 96
-
-# A signature is authored text that becomes code. Anything that is not a
-# parameter list is refused rather than pasted: a stub that does not parse fails
-# the whole scaffold, and the useful failure names the export, not the file.
-SIGNATURE = re.compile(r"^\(.*\)(\s*->\s*.+)?$", re.S)
-
-BODY = "    raise NotImplementedError"
 
 
 class ContractError(ValueError):
-    """The contract cannot be turned into code, and says which name broke it."""
+    """The target does not match the contract, and says exactly where."""
 
 
-def scaffold_from_design(task: Task) -> TaskOutput:
+def verify_target_matches_contract(task: Task) -> TaskOutput:
     design = Design.model_validate_json(task.require("design.spec"))
     root = _package_root(task)
-    interfaces = design.interface_for
 
     cycles = design.dependency_cycles()
     if cycles:
@@ -61,107 +41,87 @@ def scaffold_from_design(task: Task) -> TaskOutput:
             + "; ".join(" -> ".join([*cycle, cycle[0]]) for cycle in cycles)
         )
 
-    files: dict[str, str] = {
-        f"{root}/__init__.py": HEADER.format(
-            title="The target package.",
-            body=_wrap(f"Modules: {', '.join(m.name for m in design.modules) or '(none)'}"),
-        )
-    }
+    interfaces = design.interface_for
+    missing: list[str] = []
+    kept = 0
+    manifest: list[str] = []
 
-    exported = 0
     for module in design.modules:
-        interface = interfaces.get(module.name)
-        files[f"{root}/{module.path}/__init__.py"] = _module_source(design, module, interface)
-        exported += len(interface.exports) if interface else 0
+        package = task.cwd / root / module.path
+        defined = _names_defined_in(package)
+        manifest.append(f"{root}/{module.path}  {len(defined)} names")
+
+        for export in interfaces.get(module.name, _empty()).exports:
+            if export.name in defined:
+                kept += 1
+            else:
+                missing.append(f"{module.name}.{export.name} ({export.kind})")
 
     return TaskOutput(
         facts={
-            "scaffold.modules": len(design.modules),
-            "scaffold.endpoints": len(design.endpoints),
-            "scaffold.interfaces": len(design.interfaces),
-            "scaffold.exports": exported,
+            "contract.modules": len(design.modules),
+            "contract.exports": sum(len(i.exports) for i in design.interfaces),
+            "contract.kept": kept,
+            "contract.broken": len(missing),
+            "contract.missing": sorted(missing)[:20],
         },
-        artifacts={"scaffold.manifest": "\n".join(sorted(files)) + "\n"},
-        files=files,
+        artifacts={"scaffold.manifest": "\n".join(sorted(manifest)) + "\n"},
     )
 
 
-def _module_source(design: Design, module, interface: Interface | None) -> str:
-    satisfied = sorted(
-        {
-            requirement
-            for element in design.elements
-            if element.kind == "module" and element.summary == module.name
-            for requirement in element.satisfies
-        }
-    )
-    header = HEADER.format(
-        title=_wrap(f"{module.name} — {module.responsibility or 'no responsibility recorded'}"),
-        body=_wrap(f"Satisfies: {', '.join(satisfied) or 'see the design spec'}"),
-    )
-    if interface is None or not interface.exports:
-        return header
+def _names_defined_in(package: Path) -> set[str]:
+    """Every top-level name a package binds, without importing it.
 
-    parts = [header]
-    if interface.depends_on:
-        parts.append(_wrap(f"# Depends on: {', '.join(sorted(interface.depends_on))}") + "\n")
-
-    for export in interface.exports:
-        parts.append(_stub(module.name, export))
-
-    return "\n".join(parts)
+    Parsed rather than imported: the target is the thing under scrutiny, and a
+    module with a side effect at import time would run it inside the
+    orchestrator. `imports_resolve` already covers whether it *can* be imported,
+    in a subprocess, which is the right place for that question.
+    """
+    names: set[str] = set()
+    for path in sorted(package.rglob("*.py")) if package.exists() else []:
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue  # `imports_resolve` and the lint gate both report this properly
+        for node in tree.body:
+            names |= _bound_by(node)
+    return names
 
 
-def _stub(module: str, export: Export) -> str:
-    """One promised name, as code that imports and raises."""
-    name = _identifier(module, export.name)
-    doc = _wrap(export.summary or f"{export.kind} exported by {module}.")
-    raises = (
-        _wrap(f"Raises: {', '.join(export.raises)}") if export.raises else ""
-    )
-    docstring = '    """' + "\n    ".join(filter(None, [doc, "", raises])).rstrip() + '\n    """'
-
-    match export.kind:
-        case "exception":
-            return f'class {name}(Exception):\n    """{doc}"""\n'
-        case "class":
-            return f'class {name}:\n{docstring}\n\n{BODY}\n'
-        case "type":
-            return f'{name} = object  # {export.summary or "contract type"}\n'
+def _bound_by(node: ast.stmt) -> set[str]:
+    match node:
+        case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
+            return {node.name}
+        case ast.Assign():
+            return {t.id for t in node.targets if isinstance(t, ast.Name)}
+        case ast.AnnAssign() if isinstance(node.target, ast.Name):
+            return {node.target.id}
+        case ast.ImportFrom() | ast.Import():
+            # A re-export is a kept promise: a package whose `__init__` imports
+            # a name from a submodule does define it for its callers.
+            return {alias.asname or alias.name.split(".")[0] for alias in node.names}
         case _:
-            return f"def {name}{_signature(module, export)}:\n{docstring}\n{BODY}\n"
+            return set()
 
 
-def _signature(module: str, export: Export) -> str:
-    signature = (export.signature or "()").strip()
-    if not SIGNATURE.match(signature):
-        raise ContractError(
-            f"{module}.{export.name} declares signature {signature!r}, which is not a "
-            f"parameter list — expected something like '(code: str) -> Link'"
-        )
-    return signature
+def _empty() -> object:
+    """An interface with no exports, for a module the contract never described.
 
+    The gate rejects an uncontracted module; this keeps the audit itself from
+    raising before that gate can say so.
+    """
 
-def _identifier(module: str, name: str) -> str:
-    if not name.isidentifier() or keyword.iskeyword(name):
-        raise ContractError(f"{module} exports {name!r}, which is not a Python name")
-    return name
+    class _NoExports:
+        exports: list = []
 
-
-def _wrap(text: str) -> str:
-    """Fold prose to the line length the lint gate enforces."""
-    return "\n".join(textwrap.wrap(text, LINE_LENGTH)) or text
+    return _NoExports()
 
 
 def _package_root(task: Task) -> str:
-    """Derive the package root from the node's write scope.
+    """Where the target's packages live, from the node's params.
 
-    `target/shortener/**` -> `target/shortener`. Taking it from the scope rather
-    than a constant keeps this generic: nothing here knows the target is a URL
-    shortener (D3).
+    A param rather than the write scope, because this node no longer writes —
+    it reads a tree somebody else wrote. Nothing here knows the target is a URL
+    shortener (D3); the plan supplies the path from the target profile.
     """
-    for pattern in task.scope.allowed:
-        trimmed = pattern.rstrip("*").rstrip("/")
-        if trimmed:
-            return trimmed
-    raise ValueError("scaffold needs a write scope to derive its package root from")
+    return str(task.param("root"))

@@ -70,21 +70,40 @@ nodes:
 
   # ── Design ──────────────────────────────────────────────────────────────
   - id: design
-    kind: agent
+    kind: codeagent                   # it writes the stub packages, not just prose
     stage: design
     role: architect
     needs: [ambiguity-triage, normalize-clarification]   # SKIPPED when nothing escalated
     inputs: [intake.artifacts.register]
     output_schema: schemas/design.json
     outputs: [spec, modules, interfaces]   # gates read design.spec;
-                                           # impl fans out over design.modules;
-                                           # scaffold generates from design.interfaces
+                                           # impl fans out over design.modules
+    output_files:
+      spec: target/design.json        # one file, validated and projected by the engine
     # The architect decides the names modules call each other by — every export,
-    # every signature, every exception — because that is the one decision no
-    # implementer has the authority to make. It does not write the stubs: those
-    # are generated from this contract by `scaffold`, so the code and the
-    # contract cannot disagree and no model call can quietly implement the
-    # product while claiming to declare it (D8, D24).
+    # signature and exception — because that is the one decision no implementer
+    # has the authority to make. It writes them as **stub packages**: every
+    # promised name present, every body `raise NotImplementedError`.
+    #
+    # It writes Python rather than emitting data for a generator because
+    # generating Python from JSON means encoding Python in the schema. The first
+    # real contract needed three constructs the schema lacked — imports for the
+    # types its signatures named, base classes for an exception hierarchy, and
+    # module-level constants that `kind: type` rendered as `= object`. Each is a
+    # schema field and another run to find the next one (D24).
+    #
+    # The cost of writing code instead: it *could* implement the product, and
+    # the stubs could disagree with the contract it also declares. Both are
+    # checked below rather than trusted.
+    write_scope: ["{target.root}/**", "target/design.json"]
+    freeze_paths: ["{target.tests_root}/**"]
+    params:
+      max_turns: 80                   # eight packages of declarations
+      timeout_s: 2400
+    verify:
+      - "sh:{target.commands.lint}"
+      - py:orchestrator.gates.imports_resolve
+      - py:orchestrator.gates.stubs_are_unimplemented
     gate:                             # G3
       all:
         - predicate: contract_is_valid          # a predicate, not an expression:
@@ -94,6 +113,14 @@ nodes:
         - predicate: no_unmapped_design_elements          # catches gold-plating
         - predicate: every_module_has_an_interface        # nothing fans out uncontracted
         - predicate: module_dependencies_are_acyclic      # parallel work needs a DAG
+        - "session.files_written > 0"
+        - "ruff.exit_code == 0"
+        - "imports.resolve == true"   # a caller can import every promised name
+        - "stubs.implemented == 0"    # ...and none of them do anything yet.
+                                      # Parsed, not asked: a model told to write
+                                      # stubs will eventually write one that works,
+                                      # and a working module lints exactly as
+                                      # clean as a declared one
 
   - id: design-approval
     kind: human
@@ -106,26 +133,26 @@ nodes:
 
   # ── Build ───────────────────────────────────────────────────────────────
   - id: scaffold
-    kind: derive                      # deterministic generation (D8), no model call
+    kind: derive                      # deterministic audit (D8), no model call
     stage: implementation
     needs: [design-approval]
     inputs: [design.artifacts.spec]   # design-approval is a human node: it
                                       # produces no artifact to inherit
-    run: py:orchestrator.derive.scaffold_from_design
+    run: py:orchestrator.derive.verify_target_matches_contract
     params:
       root: "{target.root}"
     outputs: [manifest]
-    write_scope: ["{target.root}/**"]  # every package: it is writing the contract
-                                       # the fan-out then writes against
-    verify:                           # the engine runs these; the node does not
-      - "sh:{target.commands.lint}"
-      - py:orchestrator.gates.imports_resolve
-    gate:                             # G4 — the stubs are real code, and every
-      all:                            # promised name is now importable
-        - "imports.resolve == true"
-        - "ruff.exit_code == 0"
-        - "scaffold.exports > 0"      # empty packages are what the fan-out
-                                      # previously had to agree on
+    # The architect authors two things — the stub packages and the contract that
+    # describes them — and two artifacts from one author can disagree. That is
+    # the price of letting it write Python (D24), and this is what bounds it:
+    # every name the contract promises must exist in the module that promised
+    # it. Checked by parsing, before seven implementers write against a promise
+    # the code does not keep. It writes nothing; it reads what design wrote.
+    gate:                             # G4
+      all:
+        - "contract.broken == 0"
+        - "contract.exports > 0"      # a contract promising nothing is what the
+                                      # first fan-out had to agree on
 
   - id: tests-acceptance
     kind: codeagent

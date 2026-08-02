@@ -157,16 +157,28 @@ def test_the_architect_decides_the_names_before_anyone_writes_them(plan):
     assert "module_dependencies_are_acyclic()" in checks
 
 
-def test_scaffold_generates_the_contract_rather_than_an_agent_writing_it(plan):
-    """D8: a deterministic generator cannot disagree with the contract.
+def test_the_architect_writes_the_stubs_and_cannot_implement_them(plan):
+    """D24: it writes Python, so imports and base classes are just code.
 
-    It also cannot implement the product while claiming to declare it, which is
-    what a code agent asked for stubs would eventually do.
+    The cost is that it *could* implement the product. Checked by parsing the
+    tree, not by asking the session — a working module lints exactly as clean
+    as a declared one.
     """
+    design = plan.node("design")
+    assert design.kind is NodeKind.CODEAGENT
+    assert design.write_scope == ["target/shortener/**", "target/design.json"]
+    assert "py:orchestrator.gates.stubs_are_unimplemented" in design.verify
+    assert "stubs.implemented == 0" in [str(c) for c in design.gate.checks]
+
+
+def test_scaffold_audits_the_tree_against_the_contract(plan):
+    """The other half of letting one author write both: they can disagree."""
     scaffold = plan.node("scaffold")
     assert scaffold.kind is NodeKind.DERIVE
-    assert scaffold.run == "py:orchestrator.derive.scaffold_from_design"
-    assert "scaffold.exports > 0" in [str(check) for check in scaffold.gate.checks]
+    assert scaffold.run == "py:orchestrator.derive.verify_target_matches_contract"
+    assert not scaffold.write_scope        # it reads what design wrote
+    checks = [str(check) for check in scaffold.gate.checks]
+    assert "contract.broken == 0" in checks
 
 
 def test_design_approval_is_bound_to_artifact_versions(plan):

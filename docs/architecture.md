@@ -719,7 +719,8 @@ claimed.
 | **D21** | The baseline stores file **bodies**, not a reference to them | A rollback that can only name the state it wanted is a rollback in the documentation only. Content also means it works on a dirty tree and needs no VCS | Snapshot size grows with the target; fine at this scale, wrong for a large repo |
 | **D22** | A node declares `verify:` — checks the engine runs after the work, whose facts the gate then reads | The alternative is a gate expression naming a fact nothing produces (which ERRORs) or a node reporting on its own output (which D4 forbids). Also the only shape that works for fan-out children, where a per-module check cannot be a separate node | The plan carries commands as well as intent; a check is only as good as the tool behind it |
 | **D23** | *(superseded by D24)* Greenfield implementation is **one agent over the whole target**; brownfield keeps the per-module fan-out | In a new build the names modules call each other by are decided *while* the code is written, so parallel authors agree on them only by luck. A live run produced `links` importing three exception types from a module whose author had not run yet | Kept in the registry rather than deleted: it is the correct response to a greenfield build with **no contract**, and it is what the run of 2026-08-01 was parked against. D24 removes the premise instead of accepting the cost |
-| **D24** | The **architect owns the contract between modules** — every export, signature and exception — and `scaffold` generates stubs from it deterministically. The per-module fan-out returns | D23 fixed the symptom. The fan-out did not fail from concurrency; it failed because no one had the authority to name things, so seven authors each invented the interfaces they needed. Giving that authority to the architect removes the premise: a child writes bodies behind names it did not choose, and its imports resolve at its own gate rather than two nodes later. Generating rather than writing the stubs is what makes the code and the contract unable to disagree — and a generator cannot quietly implement the product, which a code agent asked for stubs eventually would | One more thing the architect must get right, and it is checked (`every_module_has_an_interface`, `module_dependencies_are_acyclic`) rather than trusted. A contract found wrong mid-implementation is an escalation, not a local fix — an implementer may read every sibling stub and write none of them. The module decomposition must be a DAG, so two modules that must change together have to be merged |
+| **D24** | The **architect owns the contract between modules** — every export, signature, exception and base class — and **writes it as stub packages**, not as data for a generator. The per-module fan-out returns | D23 fixed the symptom. The fan-out did not fail from concurrency; it failed because no one had the authority to name things, so seven authors each invented the interfaces they needed. Giving that authority to the architect removes the premise: a child writes bodies behind names it did not choose, and its imports resolve at its own gate rather than two nodes later. **Generating stubs from a JSON contract was tried first and rejected on evidence** — see D25 | One more thing the architect must get right, and it is checked (`every_module_has_an_interface`, `module_dependencies_are_acyclic`) rather than trusted. A contract found wrong mid-implementation is an escalation, not a local fix — an implementer may read every sibling stub and write none of them. The module decomposition must be a DAG, so two modules that must change together have to be merged |
+| **D25** | The architect **writes Python**; it does not emit data that the engine renders into Python. Two deterministic checks bound the cost: `stubs.implemented == 0` (AST) and `contract.broken == 0` | Generating stubs from a schema means encoding Python *in* the schema. The first real contract needed three constructs the schema did not have — imports for the types its signatures named, base classes for an exception hierarchy, and module-level constants that `kind: type` rendered as `= object`. Each is one more field and one more architect run to discover the next; the generated tree failed lint with 23 errors. The generator's advantages were real but bounded — one source of truth, and no ability to implement — and both are recoverable by checking rather than by construction | Two artifacts from one author can disagree, so `scaffold` audits every promised name against the code. A code agent asked for stubs will eventually write a working one, so every function body is parsed and must be `raise NotImplementedError` — a rule that must be kept rather than a state that cannot occur. And design costs a code-agent session instead of a free derivation |
 | **D2** | SQLite backs orchestration state, not just target data | Safe-stop resumability and reliability metrics need durable, queryable run state | Single-node only |
 | **D3** | `orchestrator` never imports `shortener`; target specifics in a config profile | Makes generality checkable rather than claimed | Some indirection |
 | **D4** | Exit gates evaluated by a non-producer, preferably a real tool | Agent self-reports are assertions, not evidence | Gates limited to machine-checkable properties |
@@ -1034,9 +1035,9 @@ the two agree with each other and with the plan on disk, so the copy here cannot
 | `ambiguity-triage` | tool | requirements | `intake` | — | G2 every ambiguity disposed **or** escalated |
 | `clarify-with-human` | human | requirements | — (optional) | — | — |
 | `normalize-clarification` | tool | requirements | `clarify-with-human` | `register` (v+1) | G2b something was resolved; no ambiguity left undisposed |
-| `design` | agent (`architect`) | design | triage, normalize | `spec`, `modules`, `interfaces` | G3 contract valid; requirement↔design matrix complete both ways; no unmapped design elements; every module has an interface; module dependencies acyclic |
+| `design` | codeagent (`architect`) | design | triage, normalize | `spec`, `modules`, `interfaces`, **and the stub packages** | G3 contract valid; requirement↔design matrix both ways; no unmapped elements; every module has an interface; dependencies acyclic; lint clean; imports resolve; **`stubs.implemented == 0`** |
 | `design-approval` | human | design | `design` | — | binds to `design.spec` (D10) |
-| `scaffold` | derive | implementation | `design-approval` | `manifest` | G4 imports resolve; lint clean; the contract generated something (`scaffold.exports > 0`) |
+| `scaffold` | derive | implementation | `design-approval` | `manifest` | G4 every name the contract promises exists in the code that promised it (`contract.broken == 0`) |
 | `tests-acceptance` | codeagent (`test-author`) | verification | `scaffold` | `suite` | **G5 the RED gate** — files written, `pytest.exit_code != 0`, every AC has a test |
 | `impl` | fanout → codeagent (`implementer`) | implementation | `tests-acceptance` | — | G6 **per module**: files written; lint clean; that module's imports resolve |
 | `tests` | tool | verification | `impl` | — | **G7 the GREEN gate** — pytest passes, coverage ≥ threshold, AC↔test matrix complete |
@@ -1137,21 +1138,40 @@ nodes:
 
   # ── Design ──────────────────────────────────────────────────────────────
   - id: design
-    kind: agent
+    kind: codeagent                   # it writes the stub packages, not just prose
     stage: design
     role: architect
     needs: [ambiguity-triage, normalize-clarification]   # SKIPPED when nothing escalated
     inputs: [intake.artifacts.register]
     output_schema: schemas/design.json
     outputs: [spec, modules, interfaces]   # gates read design.spec;
-                                           # impl fans out over design.modules;
-                                           # scaffold generates from design.interfaces
+                                           # impl fans out over design.modules
+    output_files:
+      spec: target/design.json        # one file, validated and projected by the engine
     # The architect decides the names modules call each other by — every export,
-    # every signature, every exception — because that is the one decision no
-    # implementer has the authority to make. It does not write the stubs: those
-    # are generated from this contract by `scaffold`, so the code and the
-    # contract cannot disagree and no model call can quietly implement the
-    # product while claiming to declare it (D8, D24).
+    # signature and exception — because that is the one decision no implementer
+    # has the authority to make. It writes them as **stub packages**: every
+    # promised name present, every body `raise NotImplementedError`.
+    #
+    # It writes Python rather than emitting data for a generator because
+    # generating Python from JSON means encoding Python in the schema. The first
+    # real contract needed three constructs the schema lacked — imports for the
+    # types its signatures named, base classes for an exception hierarchy, and
+    # module-level constants that `kind: type` rendered as `= object`. Each is a
+    # schema field and another run to find the next one (D24).
+    #
+    # The cost of writing code instead: it *could* implement the product, and
+    # the stubs could disagree with the contract it also declares. Both are
+    # checked below rather than trusted.
+    write_scope: ["{target.root}/**", "target/design.json"]
+    freeze_paths: ["{target.tests_root}/**"]
+    params:
+      max_turns: 80                   # eight packages of declarations
+      timeout_s: 2400
+    verify:
+      - "sh:{target.commands.lint}"
+      - py:orchestrator.gates.imports_resolve
+      - py:orchestrator.gates.stubs_are_unimplemented
     gate:                             # G3
       all:
         - predicate: contract_is_valid          # a predicate, not an expression:
@@ -1161,6 +1181,14 @@ nodes:
         - predicate: no_unmapped_design_elements          # catches gold-plating
         - predicate: every_module_has_an_interface        # nothing fans out uncontracted
         - predicate: module_dependencies_are_acyclic      # parallel work needs a DAG
+        - "session.files_written > 0"
+        - "ruff.exit_code == 0"
+        - "imports.resolve == true"   # a caller can import every promised name
+        - "stubs.implemented == 0"    # ...and none of them do anything yet.
+                                      # Parsed, not asked: a model told to write
+                                      # stubs will eventually write one that works,
+                                      # and a working module lints exactly as
+                                      # clean as a declared one
 
   - id: design-approval
     kind: human
@@ -1173,26 +1201,26 @@ nodes:
 
   # ── Build ───────────────────────────────────────────────────────────────
   - id: scaffold
-    kind: derive                      # deterministic generation (D8), no model call
+    kind: derive                      # deterministic audit (D8), no model call
     stage: implementation
     needs: [design-approval]
     inputs: [design.artifacts.spec]   # design-approval is a human node: it
                                       # produces no artifact to inherit
-    run: py:orchestrator.derive.scaffold_from_design
+    run: py:orchestrator.derive.verify_target_matches_contract
     params:
       root: "{target.root}"
     outputs: [manifest]
-    write_scope: ["{target.root}/**"]  # every package: it is writing the contract
-                                       # the fan-out then writes against
-    verify:                           # the engine runs these; the node does not
-      - "sh:{target.commands.lint}"
-      - py:orchestrator.gates.imports_resolve
-    gate:                             # G4 — the stubs are real code, and every
-      all:                            # promised name is now importable
-        - "imports.resolve == true"
-        - "ruff.exit_code == 0"
-        - "scaffold.exports > 0"      # empty packages are what the fan-out
-                                      # previously had to agree on
+    # The architect authors two things — the stub packages and the contract that
+    # describes them — and two artifacts from one author can disagree. That is
+    # the price of letting it write Python (D24), and this is what bounds it:
+    # every name the contract promises must exist in the module that promised
+    # it. Checked by parsing, before seven implementers write against a promise
+    # the code does not keep. It writes nothing; it reads what design wrote.
+    gate:                             # G4
+      all:
+        - "contract.broken == 0"
+        - "contract.exports > 0"      # a contract promising nothing is what the
+                                      # first fan-out had to agree on
 
   - id: tests-acceptance
     kind: codeagent

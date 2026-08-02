@@ -17,6 +17,7 @@ here: their exit code *is* the observation, and the tool worker already records 
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -83,6 +84,78 @@ def imports_resolve(task: Task) -> TaskOutput:
             "imports.modules": len(modules),
             "imports.unresolved": [f"{name}: {why}" for name, why in sorted(failed.items())],
         }
+    )
+
+
+def stubs_are_unimplemented(task: Task) -> TaskOutput:
+    """Every function and method under the target root must still be a stub (D24).
+
+    The one thing an architect writing code can do that a generator could not:
+    implement the product while claiming to declare it. A model told to write
+    stubs will eventually write one that works, and a working `errors` module is
+    indistinguishable at a lint gate from a declared one.
+
+    So it is checked by parsing, not by asking. A body counts as unimplemented
+    when it is `raise NotImplementedError`, optionally preceded by a docstring
+    or `...`. Anything else — a return, a computation, a second statement — is
+    implementation, and the node that wrote it does not own that decision.
+
+    Deliberately not "the file is short" or "it contains NotImplementedError":
+    both pass for a module that implements nine functions and stubs a tenth.
+    """
+    root = task.cwd / Path(task.param("root"))
+    implemented: list[str] = []
+    stubs = 0
+
+    for path in sorted(root.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError as exc:
+            raise WorkerError(f"{path} does not parse: {exc}") from exc
+
+        for func in _functions_in(tree):
+            if _is_stub(func):
+                stubs += 1
+            else:
+                implemented.append(f"{path.relative_to(task.cwd)}:{func.lineno} {func.name}")
+
+    return TaskOutput(
+        facts={
+            "stubs.total": stubs,
+            "stubs.implemented": len(implemented),
+            "stubs.offenders": implemented[:20],
+        }
+    )
+
+
+def _functions_in(tree: ast.AST) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    ]
+
+
+def _is_stub(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """A docstring and/or `...`, then `raise NotImplementedError`. Nothing else."""
+    body = list(func.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]                                  # docstring
+    body = [stmt for stmt in body if not _is_ellipsis(stmt)]
+
+    if len(body) != 1 or not isinstance(body[0], ast.Raise):
+        return False
+
+    raised = body[0].exc
+    name = raised.func if isinstance(raised, ast.Call) else raised
+    return isinstance(name, ast.Name) and name.id == "NotImplementedError"
+
+
+def _is_ellipsis(stmt: ast.stmt) -> bool:
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Constant)
+        and stmt.value.value is Ellipsis
     )
 
 
