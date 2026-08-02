@@ -166,7 +166,7 @@ def test_the_architect_writes_the_stubs_and_cannot_implement_them(plan):
     """
     design = plan.node("design")
     assert design.kind is NodeKind.CODEAGENT
-    assert design.write_scope == ["target/shortener/**", "target/design.json"]
+    assert design.write_scope == ["target/shortener/**"]   # everything under the profile root
     assert "py:orchestrator.gates.stubs_are_unimplemented" in design.verify
     assert "stubs.implemented == 0" in [str(c) for c in design.gate.checks]
 

@@ -79,7 +79,7 @@ nodes:
     outputs: [spec, modules, interfaces]   # gates read design.spec;
                                            # impl fans out over design.modules
     output_files:
-      spec: target/design.json        # one file, validated and projected by the engine
+      spec: "{target.root}/design.json"   # one file, validated and projected by the engine
     # The architect decides the names modules call each other by — every export,
     # signature and exception — because that is the one decision no implementer
     # has the authority to make. It writes them as **stub packages**: every
@@ -95,7 +95,7 @@ nodes:
     # The cost of writing code instead: it *could* implement the product, and
     # the stubs could disagree with the contract it also declares. Both are
     # checked below rather than trusted.
-    write_scope: ["{target.root}/**", "target/design.json"]
+    write_scope: ["{target.root}/**"]
     freeze_paths: ["{target.tests_root}/**"]
     params:
       root: "{target.root}"           # the verify probes inherit these, and both
@@ -259,14 +259,14 @@ nodes:
     role: technical-writer
     outputs: [readme]                 # gates read docs.readme
     output_files:
-      readme: target/README.md
+      readme: "{target.root}/README.md"
     needs: [impl]
     inputs: [design.artifacts.spec, intake.artifacts.register]
     effort: medium
-    write_scope: ["target/README.md", "target/docs/**"]
+    write_scope: ["{target.root}/README.md", "{target.root}/docs/**"]
     params:
       root: "{target.root}"
-      readme: target/README.md
+      readme: "{target.root}/README.md"
       setup_timeout_s: 900
     verify:
       # The gate asks for a recorded exit code from running the documented

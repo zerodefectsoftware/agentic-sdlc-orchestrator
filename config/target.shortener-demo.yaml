@@ -1,0 +1,26 @@
+# A second shortener target, for a fresh end-to-end run.
+#
+# Identical to `target.shortener.yaml` except for where it writes. Pointing a
+# run here leaves the accepted implementation in `target/shortener` and its 86
+# passing tests untouched — a run is destructive to its target by design, and
+# the only safe way to demonstrate one twice is to give the second its own root.
+
+target:
+  name: shortener-demo
+  root: target/shortener_demo
+  tests_root: target/shortener_demo_tests
+  language: python
+
+  commands:
+    test: .venv/bin/pytest target/shortener_demo_tests
+    test_cov: .venv/bin/pytest target/shortener_demo_tests --cov=target/shortener_demo --cov-report=json
+    lint: .venv/bin/ruff check target/shortener_demo
+    lint_path: .venv/bin/ruff check
+    format: .venv/bin/ruff format target/shortener_demo
+    serve: .venv/bin/uvicorn shortener_demo.main:app
+
+  write_ceiling:
+    - "target/**"
+
+  thresholds:
+    coverage_min: 80
