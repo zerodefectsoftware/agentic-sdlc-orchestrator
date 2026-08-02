@@ -638,3 +638,58 @@ def test_the_threshold_the_plan_set_is_the_one_checked(registry, session, run, a
         threshold="medium",
     )
     assert passed
+
+
+# --------------------------------------------------------------------------- #
+# executable documentation (G8)
+# --------------------------------------------------------------------------- #
+
+
+def documented(registry, session, run, artifacts, prose: str, *endpoints: str):
+    record(session, run, artifacts, "design.spec", Design(endpoints=list(endpoints)))
+    artifact = recorder.record_artifact(session, run, name="docs.readme", content=prose)
+    artifact.path = str(artifacts.write(run.id, "docs.readme", artifact.version, prose))
+    session.flush()
+    return check(registry, "documented_endpoints_match_openapi", context(session, run, artifacts))
+
+
+def test_a_readme_documenting_the_contract_passes(registry, session, run, artifacts):
+    """It could not, before: the check compared `/api/links` against the
+    contract's `POST /api/links`, so the two sets never intersected and every
+    endpoint was reported as both undocumented *and* invented."""
+    prose = "## API\n\n- `POST /api/links` creates one\n- `GET /{code}` redirects\n"
+    passed, detail = documented(
+        registry, session, run, artifacts, prose, "POST /api/links", "GET /{code}"
+    )
+    assert passed, detail
+
+
+def test_an_endpoint_the_readme_never_mentions_is_caught(registry, session, run, artifacts):
+    prose = "## API\n\n- `POST /api/links` creates one\n"
+    passed, detail = documented(
+        registry, session, run, artifacts, prose, "POST /api/links", "GET /health"
+    )
+    assert not passed
+    assert "GET /health" in detail
+
+
+def test_an_endpoint_the_contract_never_promised_is_caught(registry, session, run, artifacts):
+    prose = "- `POST /api/links`\n- `DELETE /api/admin/wipe`\n"
+    passed, detail = documented(registry, session, run, artifacts, prose, "POST /api/links")
+    assert not passed
+    assert "DELETE /api/admin/wipe" in detail
+
+
+def test_the_setup_predicate_says_why_the_steps_failed(registry, session, run, artifacts):
+    """A retry is told what to fix, and "exit code 1" is not that."""
+    facts = {
+        "setup.exit_code": Fact(1, FactSource.TOOL, "setup"),
+        "setup.detail": Fact("ImportError: cannot import name 'UTC'", FactSource.TOOL, "setup"),
+    }
+    passed, detail = check(
+        registry,
+        "setup_steps_execute_in_clean_venv",
+        context(session, run, artifacts, facts=facts),
+    )
+    assert not passed
+    assert "UTC" in detail

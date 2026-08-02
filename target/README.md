@@ -11,40 +11,41 @@ It is a prototype: single instance, single SQLite file, no authentication. See
 
 ## Setup
 
-From a fresh checkout, in the repository root. Python 3.13 or newer is required;
-substitute whatever name your system gives that interpreter for `python3.13`.
-
-```bash
-python3.13 --version    # must report 3.13 or newer
-python3.13 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install "fastapi>=0.115" "uvicorn[standard]>=0.32" "sqlalchemy>=2.0" "pydantic>=2.9" "pydantic-settings>=2.6" "httpx>=0.28" "pytest>=8.3" "pytest-asyncio>=0.24"
-```
-
-Run the service. It must be started from `target/`, because the `shortener`
-package is not installed — it is imported from the working directory.
+From a fresh checkout, starting in the directory that contains `target/`.
+Requires Python 3.11 or newer (developed on 3.13), `pip`, and network access to
+PyPI. Nothing else is assumed to be installed or running.
 
 ```bash
 cd target
-../.venv/bin/uvicorn shortener.main:app --host 127.0.0.1 --port 8000
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install "fastapi>=0.115" "uvicorn[standard]>=0.32" "sqlalchemy>=2.0" "pydantic>=2.9" "pydantic-settings>=2.6" "httpx>=0.28" "pytest>=8.3"
+.venv/bin/python -c "import shortener.main; print('shortener imports cleanly')"
 ```
 
-The datastore is created on first start. Check it is up:
+The virtual environment lives inside `target/` and the `shortener` package is
+never installed: it is imported from the working directory, so every command
+below is run from `target/`.
+
+Start the service:
 
 ```bash
-curl -i http://127.0.0.1:8000/health
+.venv/bin/uvicorn shortener.main:app --host 127.0.0.1 --port 8000
 ```
 
-Run the acceptance suite (from the repository root, with the service stopped —
-the tests start their own app against their own temporary database):
+The SQLite file is created on first start. In another shell, confirm it is up —
+this should print `{"status":"ok","datastore":true}`:
 
 ```bash
-.venv/bin/pytest target/tests
+curl -sS http://127.0.0.1:8000/health
 ```
 
-These commands were last run end to end in an empty virtual environment on
-Python 3.13 with nothing preinstalled: the service started, `/health` returned
-`{"status":"ok","datastore":true}`, and the suite reported 86 passed.
+Run the acceptance suite (with the service stopped — the tests start their own
+app against their own temporary database):
+
+```bash
+.venv/bin/python -m pytest tests
+```
 
 ### Configuration
 

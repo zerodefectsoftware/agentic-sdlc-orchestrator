@@ -551,7 +551,11 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
                 "must run them in a clean environment before this gate can hold"
             )
         if fact.value != 0:
-            return False, f"documented setup steps failed with exit code {fact.value}"
+            detail = context.facts.get("setup.detail")
+            because = f" — {detail.value}" if detail is not None else ""
+            return False, (
+                f"documented setup steps failed with exit code {fact.value}{because}"
+            )
         return True, "documented setup steps executed successfully"
 
     @reg.register(
@@ -566,7 +570,17 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
             return False, "no documentation artifact has been recorded"
 
         prose = artifacts.read(readme)
-        documented = set(re.findall(r"(?:GET|POST|PUT|PATCH|DELETE)\s+(/\S*)", prose))
+        # Method *and* path. Capturing the path alone compared `/api/links`
+        # against the contract's `POST /api/links`, so the two sets could never
+        # intersect: every endpoint reported as both undocumented and invented,
+        # and no README could have satisfied this check. Trailing markdown —
+        # a backtick closing an inline span — is not part of a path.
+        documented = {
+            f"{method} {path.rstrip('`.,;:)')}"
+            for method, path in re.findall(
+                r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/\S*)", prose
+            )
+        }
         expected = set(design.endpoints)
 
         missing = sorted(expected - documented)
