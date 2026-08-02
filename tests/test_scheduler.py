@@ -375,6 +375,29 @@ def test_re_deriving_an_artifact_marks_descendants_stale(session, tmp_path):
     assert statuses(session, run)["verify"] is NodeStatus.STALE
 
 
+def test_a_stale_node_re_enters_the_graph(session, tmp_path):
+    """The cascade is only half of re-planning; this is the other half.
+
+    Marking downstream STALE and never collecting it again is a one-way door:
+    the node never runs, and `_settle` fails the run as stuck. STALE says the
+    recorded result was computed from something withdrawn — which is a reason to
+    do the work again, not a terminal state.
+    """
+    worker = StubWorker(
+        {"build": scripts.passing("make"), "verify": scripts.passing("pytest")}
+    )
+    scheduler, run = run_plan(session, plan_from(tmp_path, LINEAR), worker)
+
+    store.get_node(session, run, "verify").status = NodeStatus.STALE
+    session.flush()
+
+    run.status = RunStatus.RUNNING
+    scheduler.advance(session, run)
+
+    assert statuses(session, run)["verify"] is NodeStatus.PASSED
+    assert run.status is RunStatus.COMPLETED
+
+
 # --------------------------------------------------------------------------- #
 # fanout
 # --------------------------------------------------------------------------- #

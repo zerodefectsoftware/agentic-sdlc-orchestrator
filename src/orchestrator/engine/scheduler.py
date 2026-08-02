@@ -157,10 +157,19 @@ class Scheduler:
     # ----------------------------------------------------------------- #
 
     def _ready(self, session: Session, run: Run) -> list[Node]:
-        """Every node that can run now — the wave."""
+        """Every node that can run now — the wave.
+
+        STALE counts as re-enterable. It means "your result was computed from
+        something that has since been withdrawn", which is a statement about the
+        recorded result, not a terminal state — the work has to happen again.
+        Collecting only PENDING left an invalidated node with no way back into
+        the graph: it never ran, and `_settle` then failed the run as stuck. The
+        cascade existed and the re-entry did not, so re-planning was a one-way
+        door onto a wedged run.
+        """
         ready: list[Node] = []
         for execution in store.all_nodes(session, run):
-            if execution.status is not NodeStatus.PENDING:
+            if execution.status not in (NodeStatus.PENDING, NodeStatus.STALE):
                 continue
             node = self._node(execution.node_id)
             if node is None:

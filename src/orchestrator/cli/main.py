@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 from typing import Annotated
 
+import networkx as nx
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -25,7 +26,12 @@ from sqlalchemy import select
 
 from orchestrator.artifacts import Baseline
 from orchestrator.config import MissingCredential, WorkerMode, get_settings
-from orchestrator.engine.loader import PlanError, execution_order, load_plan
+from orchestrator.engine.loader import (
+    PlanError,
+    dependency_graph,
+    execution_order,
+    load_plan,
+)
 from orchestrator.engine.profile import ProfileError, TargetProfile
 from orchestrator.engine.scheduler import Scheduler, verify_probes
 from orchestrator.evidence import assemble, render
@@ -591,6 +597,13 @@ def invalidate(
     """
     with store.Store().session() as session:
         run = _resolve(session, run_id)
+        graph = dependency_graph(
+            load_plan(
+                get_settings().plans_dir / f"{run.plan_name}.yaml",
+                profile=_profile(Path(run.target_profile)),
+            )
+        )
+
         for node_id in nodes:
             execution = store.get_node(session, run, node_id)
             if execution is None:
@@ -605,6 +618,17 @@ def invalidate(
             )
             execution.status = NodeStatus.PENDING
             console.print(f"[yellow]withdrawn[/yellow] {node_id} — re-entering")
+
+            # A result computed from something withdrawn is not evidence (§6).
+            # Without this the withdrawn node re-runs while everything built on
+            # its old output keeps its green — and the downstream node that
+            # would consume the *new* output is still PASSED, so it is never
+            # collected and never sees it.
+            for descendant in sorted(nx.descendants(graph, node_id)):
+                downstream = store.get_node(session, run, descendant)
+                if downstream is not None and downstream.status is NodeStatus.PASSED:
+                    downstream.status = NodeStatus.STALE
+                    console.print(f"[dim]  stale[/dim] {descendant} — built on it")
 
         run.status = RunStatus.RUNNING
         run.stop_reason = None

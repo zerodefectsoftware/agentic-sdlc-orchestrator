@@ -559,3 +559,34 @@ def test_a_passing_result_can_be_withdrawn_when_the_gate_was_wrong(cli, workspac
         assert store.get_node(session, run, "design").status is NodeStatus.PENDING
         rejected = [a for a in run.approvals if a.node_id == "design" and a.note]
         assert "result withdrawn" in rejected[-1].note
+
+
+def test_withdrawing_a_result_withdraws_what_was_built_on_it(cli, workspace):
+    """A result computed from something withdrawn is not evidence (§6).
+
+    Without the cascade the withdrawn node re-runs while its consumers keep
+    their green — so the node that would read the *new* output is still PASSED,
+    is never collected, and never sees it. The run then completes around a
+    change nobody applied.
+    """
+    start(cli, workspace)
+    with store.Store().session() as session:
+        run_id = session.scalars(select(Run)).all()[-1].id
+
+    # Take the checkpoint, so there is a green result downstream of `design`
+    # for the withdrawal to reach.
+    invoke(cli, workspace, "approve", run_id, "design-approval", "--by", "alice")
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "design-approval").status is NodeStatus.PASSED
+
+    output = invoke(
+        cli, workspace, "invalidate", run_id, "design",
+        "--by", "ops", "--why", "the design predates the interface contract",
+    )
+
+    assert "stale" in output
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "design").status is NodeStatus.PENDING
+        assert store.get_node(session, run, "design-approval").status is NodeStatus.STALE
