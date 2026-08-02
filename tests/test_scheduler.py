@@ -1065,3 +1065,48 @@ def test_a_node_says_it_is_running_before_the_work_starts(db, tmp_path):
         scheduler.advance(session, run)
 
     assert seen and all(status == "running" for status in seen)
+
+
+def test_a_retry_is_told_why_the_last_attempt_was_rejected(db, tmp_path):
+    """A bounded retry is only worth having if the retry knows something new.
+
+    Four implementers wrote `timezone.utc`, all four failed the same lint rule,
+    and every retry would have written it again — each was handed exactly the
+    inputs it had already failed on.
+    """
+    seen: list[dict] = []
+
+    def capture(node, inputs, scope):
+        seen.append(dict(inputs))
+        return scripts.failing("pytest") if len(seen) == 1 else scripts.passing("pytest")
+
+    worker = StubWorker(default=scripts.passing("pytest"))
+    worker.run = capture                                # type: ignore[method-assign]
+
+    with db.session() as session:
+        scheduler = Scheduler(plan_from(tmp_path, RETRYING), worker)
+        run = scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+        scheduler.advance(session, run)
+
+    assert len(seen) == 2
+    assert "previous_attempt" not in seen[0]
+    assert "pytest.exit_code == 0" in seen[1]["previous_attempt"]
+
+
+def test_a_first_attempt_is_told_nothing(db, tmp_path):
+    """Only failing checks, only from the last attempt — not a narration of the run."""
+    seen: list[dict] = []
+
+    def capture(node, inputs, scope):
+        seen.append(dict(inputs))
+        return scripts.passing("pytest")
+
+    worker = StubWorker(default=scripts.passing("pytest"))
+    worker.run = capture                                # type: ignore[method-assign]
+
+    with db.session() as session:
+        scheduler = Scheduler(plan_from(tmp_path, RETRYING), worker)
+        run = scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+        scheduler.advance(session, run)
+
+    assert seen and all("previous_attempt" not in call for call in seen)

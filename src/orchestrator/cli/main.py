@@ -744,12 +744,22 @@ def resume(run_id: Annotated[str | None, typer.Argument()] = None) -> None:
 def watch(
     run_id: Annotated[str | None, typer.Argument()] = None,
     interval: Annotated[float, typer.Option(help="Seconds between polls")] = 1.0,
+    until_done: Annotated[
+        bool, typer.Option("--until-done", help="Exit when the run stops, instead of following")
+    ] = False,
 ) -> None:
     """Follow a run as it executes. Open this in a second terminal.
 
     Reads the run's recorded state and prints each change as it lands: a node
     starting, a gate's verdict and the checks behind it, an artifact version, a
-    checkpoint opening. Exits when the run reaches a terminal state.
+    checkpoint opening.
+
+    **It follows through a stop.** Blocking on a checkpoint is a normal state to
+    watch, not the end of one — the run sits there until somebody approves, then
+    keeps going in a different process, and a watcher that exited at the first
+    block would miss everything after the first human decision. Run status
+    changes are printed as they happen; `--until-done` restores the exiting
+    behaviour for scripting.
 
     It is a reader, not a participant — it holds no lock and cannot affect the
     run it is watching. Every line it prints is state already committed, so what
@@ -807,8 +817,16 @@ def watch(
                 seen_artifacts.add(key)
                 console.print(f"  [cyan]awaiting[/cyan] {approval.node_id}")
 
-            if run.status is not RunStatus.RUNNING:
-                console.print(f"\n[bold]{run.status}[/bold] — {run.stop_reason or 'done'}")
+            status = str(run.status)
+            if seen_status.get("<run>") != status:
+                seen_status["<run>"] = status
+                colour = {"completed": "green", "blocked": "cyan"}.get(status, "yellow")
+                console.print(
+                    f"\n[bold {colour}]run {status}[/bold {colour}]"
+                    + (f" — {run.stop_reason}" if run.stop_reason else "")
+                    + "\n"
+                )
+            if until_done and run.status is not RunStatus.RUNNING:
                 return
 
         time.sleep(interval)

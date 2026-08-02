@@ -47,6 +47,15 @@ all:
 You cannot run commands. Tests and linting are separate steps that run after
 you, and their results are what decide whether your work is accepted.
 
+## If you are being retried
+
+You may be given a `previous_attempt` input. That is the gate's verdict on your
+last try, and the same checks run again — so fix what it names before anything
+else, and do not re-submit the same code hoping for a different answer.
+
+Read it literally. "ruff.exit_code == 0 does not hold" means run the linter's
+rule in your head over what you wrote; it does not mean your approach was wrong.
+
 ## What you are being judged on
 
 An acceptance suite that already exists and that you did not write. It was

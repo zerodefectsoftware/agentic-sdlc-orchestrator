@@ -224,6 +224,10 @@ class Scheduler:
                 decision = _decision_text(session, run, upstream.id)
                 if decision:
                     material[f"{upstream.id}.decision"] = decision
+
+        verdict = _last_failure(store.get_node(session, run, node.id))
+        if verdict:
+            material["previous_attempt"] = verdict
         return material
 
     def _execute(self, wave: list[Node], material: dict[str, dict[str, str]]) -> list[Outcome]:
@@ -916,6 +920,40 @@ def _answerable(check: GateCheck, facts: FactSet) -> bool:
     except expressions.ExpressionError:
         return False
     return path in facts
+
+
+def _last_failure(execution) -> str | None:
+    """Why this node's previous attempt was rejected, as material for the next.
+
+    A bounded retry is only worth having if the retry knows something the first
+    attempt did not. Without this, a code agent is handed exactly the inputs it
+    already failed on and reaches for the same answer — four implementers wrote
+    `timezone.utc`, all four failed the same lint rule, and every retry would
+    have written it again.
+
+    Only failing checks are passed on, and only from the last attempt: the point
+    is to say what to fix, not to narrate the run's history at an agent.
+    """
+    if execution is None:
+        return None
+    record = _latest_gate(execution)
+    if record is None or record.verdict == "pass":
+        return None
+
+    failures = [
+        f"- {check['check']}: {check['verdict'].upper()}"
+        + (f" — {check['detail']}" if check.get("detail") else "")
+        + (f" (observed {check['observed']})" if check.get("observed") else "")
+        for check in record.checks
+        if check["verdict"] != "pass"
+    ]
+    if not failures:
+        return None
+
+    return (
+        "Your previous attempt was rejected. Fix these before anything else — "
+        "the same checks run again.\n\n" + "\n".join(failures)
+    )
 
 
 def _latest_gate(execution):
