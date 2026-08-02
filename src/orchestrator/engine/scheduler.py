@@ -435,7 +435,10 @@ class Scheduler:
                 # particular, and a per-module budget cannot be set at all.
                 # Passed through as authored: the item's own fields belong in
                 # `write_scope` and `verify`, where `{item.*}` is substituted.
-                params=dict(template.params),
+                params={
+                    key: _substitute(value, item) if isinstance(value, str) else value
+                    for key, value in template.params.items()
+                },
                 freeze_paths=list(template.freeze_paths),
                 gate=template.gate,
                 model=template.model,

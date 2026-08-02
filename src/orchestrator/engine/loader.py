@@ -73,12 +73,45 @@ def load_plan(
 
 
 def dependency_graph(plan: Plan) -> nx.DiGraph:
-    """Edges point from dependency to dependent, so topological order is execution order."""
+    """Edges point from dependency to dependent, so topological order is execution order.
+
+    The graph **as authored**. A run mutates its own shape — fan-out children,
+    repair nodes and escalations are inserted while it executes — so anything
+    reasoning about a live run wants `runtime_graph` instead.
+    """
     graph = nx.DiGraph()
     graph.add_nodes_from(plan.node_ids)
     for node in plan.nodes:
         for dependency in node.needs:
             graph.add_edge(dependency, node.id)
+    return graph
+
+
+def runtime_graph(plan: Plan, inserted: dict[str, list[str]]) -> nx.DiGraph:
+    """The graph a run actually has: the plan, plus everything it grew.
+
+    The plan is the shape a run *starts* with. Fan-out children, repair nodes
+    and escalations are added as it executes, and they are real nodes with real
+    edges — a fan-out child is downstream of its parent in every sense that
+    matters to invalidation, staleness, or "what depends on this".
+
+    Reasoning about the authored graph instead is a category error, and it was
+    the root of four separate defects: withdrawing a result left its escalations
+    open because they were invisible to the cascade; invalidating a fan-out left
+    its children untouched for the same reason. The engine was executing one
+    graph and reasoning about another.
+
+    `inserted` maps node id → the dependencies it acquired at runtime, which is
+    exactly what `node_executions.extra_needs` persists. Nodes that appear only
+    there are added as nodes in their own right.
+    """
+    graph = dependency_graph(plan)
+    for node_id, dependencies in inserted.items():
+        graph.add_node(node_id)
+        for dependency in dependencies:
+            # The inserted edge means "node_id waits for dependency", so the
+            # arrow runs dependency → node_id like every other edge here.
+            graph.add_edge(dependency, node_id)
     return graph
 
 

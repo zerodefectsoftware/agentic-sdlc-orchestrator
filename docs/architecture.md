@@ -1273,21 +1273,27 @@ nodes:
       write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
       freeze_paths: ["{target.tests_root}/**"]        # D6: not the suite judging it
       params:
-        root: "{target.root}"   # the verify probes inherit these
+        root: "{target.root}"                     # for imports_resolve
+        module: "{target.root}/{item.path}"       # ...and for the stub check
         max_turns: 60         # one module, against a settled contract
         timeout_s: 1800
       verify:
         - "sh:{target.commands.lint_path} {target.root}/{item.path}"
         - py:orchestrator.gates.imports_resolve
+        - py:orchestrator.gates.stubs_are_unimplemented
       gate:                           # G6, per module. Scoped to this module on
         all:                          # purpose: the acceptance suite cannot be
                                       # green until the last child lands, so
                                       # every earlier one would fail for work
                                       # that was never its own. G7 is where the
                                       # suite has to be green.
-          - "session.files_written > 0"   # an implementer that wrote nothing
-                                          # lints clean; seven of them did, and
-                                          # every gate reported green
+          - "stubs.total == 0"            # no unimplemented body left in MY module.
+                                          # Not "did you write files": seven
+                                          # implementers once wrote nothing and
+                                          # lint reported green, but files-written
+                                          # fails an agent whose module a previous
+                                          # attempt already finished. This asks for
+                                          # the outcome, so re-running is idempotent
           - "ruff.exit_code == 0"
           - "imports.resolve == true"     # newly meaningful: the stubs mean a
                                           # module's imports resolve at its own

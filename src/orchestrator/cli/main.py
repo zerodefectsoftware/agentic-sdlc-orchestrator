@@ -655,6 +655,20 @@ def invalidate(
             execution.status = NodeStatus.PENDING
             console.print(f"[yellow]withdrawn[/yellow] {node_id} — re-entering")
 
+            # Everything this node acquired at runtime is its own work, and goes
+            # with it. `extra_needs` is exactly that list: a fan-out's children,
+            # a failed node's repair. They are *upstream* of it in dependency
+            # terms — the parent waits for them — so no descendant cascade will
+            # ever reach them, and leaving them behind is what made withdrawing
+            # a fan-out a no-op that then reported success.
+            for owned in list(execution.extra_needs or ()):
+                row = store.get_node(session, run, owned)
+                if row is None or row.status is NodeStatus.PENDING:
+                    continue
+                row.status = NodeStatus.PENDING
+                console.print(f"[dim]  re-entering[/dim] {owned} — its work belongs to {node_id}")
+                _retire_escalations(session, run, owned, by, why)
+
             # A result computed from something withdrawn is not evidence (§6).
             # Without this the withdrawn node re-runs while everything built on
             # its old output keeps its green — and the downstream node that

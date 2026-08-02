@@ -105,7 +105,9 @@ def stubs_are_unimplemented(task: Task) -> TaskOutput:
     Deliberately not "the file is short" or "it contains NotImplementedError":
     both pass for a module that implements nine functions and stubs a tenth.
     """
-    root = task.cwd / Path(task.param("root"))
+    # `module` narrows the check to one package, so a fan-out child is judged
+    # on its own directory rather than on whichever sibling is half-written.
+    root = task.cwd / Path(task.params.get("module") or task.param("root"))
     implemented: list[str] = []
     stubs = 0
 
