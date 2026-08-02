@@ -675,7 +675,14 @@ def resume(run_id: Annotated[str | None, typer.Argument()] = None) -> None:
 @app.command()
 def recheck(
     run_id: Annotated[str, typer.Argument()],
-    node: Annotated[str, typer.Argument(help="The errored node to re-check")],
+    node: Annotated[str, typer.Argument(help="The errored or failed node to re-check")],
+    by: Annotated[
+        str | None, typer.Option(help="Who is deciding — required to re-check a FAIL")
+    ] = None,
+    why: Annotated[
+        str | None,
+        typer.Option(help="What changed about the question — required to re-check a FAIL"),
+    ] = None,
 ) -> None:
     """Re-run the checks that could not be performed, without re-doing the work.
 
@@ -685,10 +692,16 @@ def recheck(
     session because a plan omitted a param is exactly the waste the ERROR
     verdict exists to prevent.
 
-    Only the ERRORED checks are re-evaluated; the rest keep the verdicts they
-    were given. A failed check cannot be re-decided this way, and a failed node
-    cannot enter at all — this direction can only turn "could not tell" into an
-    answer, never "no" into "yes".
+    After an ERROR only the unperformed checks are re-evaluated; the rest keep
+    the verdicts they were given, so nothing that answered "no" is re-asked.
+
+    A FAILED node can be re-checked too, but only with `--by` and `--why` on the
+    record. A check that answered "no" is worth asking again when the *question*
+    changed — a verify command scoped to the wrong tree, a threshold read from
+    the wrong profile — and the alternative is worse: waiving past a gate that
+    was simply wrong records someone accepting a defect that never existed. The
+    safeguard is the record, not refusal: the superseded verdict keeps its own
+    attempt, and the reason lands in the new gate record's evaluator.
     """
     with store.Store().session() as session:
         target = _resolve(session, run_id)
@@ -700,7 +713,7 @@ def recheck(
         scheduler.rehydrate(session, target)
 
         try:
-            result = scheduler.revalidate(session, target, node)
+            result = scheduler.revalidate(session, target, node, reason=why, by=by)
         except SchedulerError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc

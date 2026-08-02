@@ -34,9 +34,9 @@ from sqlalchemy.orm import Session
 
 from orchestrator.config import get_settings
 from orchestrator.engine.loader import dependency_graph
-from orchestrator.engine.plan import Gate, Node, NodeKind, Plan
+from orchestrator.engine.plan import ExpressionCheck, Gate, GateCheck, Node, NodeKind, Plan
 from orchestrator.evidence.render import render_json
-from orchestrator.gates import CheckResult, GateResult, Verdict, evaluate_gate
+from orchestrator.gates import CheckResult, GateResult, Verdict, evaluate_gate, expressions
 from orchestrator.gates.facts import FactSet
 from orchestrator.gates.registry import PredicateContext, PredicateRegistry
 from orchestrator.gates.registry import registry as default_registry
@@ -632,7 +632,15 @@ class Scheduler:
     # re-checking without re-doing
     # ----------------------------------------------------------------- #
 
-    def revalidate(self, session: Session, run: Run, node_id: str) -> GateResult:
+    def revalidate(
+        self,
+        session: Session,
+        run: Run,
+        node_id: str,
+        *,
+        reason: str | None = None,
+        by: str | None = None,
+    ) -> GateResult:
         """Re-run the checks that could not be performed, and re-decide the gate.
 
         The recovery an ERROR actually needs. `retry` re-enters the node and
@@ -641,38 +649,61 @@ class Scheduler:
         harness needs attention and the work does not. A twelve-minute code
         agent session should not be repeated because a plan omitted a param.
 
-        **Only the ERRORED checks are re-evaluated.** The others were performed;
-        their verdicts stand and are carried forward unchanged. That is what
-        keeps this from being a way to manufacture green: a check that FAILED
-        cannot be re-decided here, and a node that FAILED cannot enter at all.
+        **After an ERROR, only the ERRORED checks are re-evaluated.** The others
+        were performed; their verdicts stand and are carried forward unchanged,
+        so this cannot turn a "no" into a "yes".
+
+        **After a FAIL it re-evaluates everything, and demands a justification.**
+        A check that answered "no" is only worth asking again when the question
+        changed — a verify command scoped to the wrong tree, a threshold read
+        from the wrong profile. That is a real and recurring situation, and the
+        alternative is worse: waiving past a gate that was simply wrong records
+        a human accepting a defect that never existed.
+
+        The safeguard is not refusal, it is the record. `reason` and `by` are
+        required, both land in the gate record's evaluator, and the superseded
+        verdict keeps its own attempt — so the evidence bundle shows attempt 5
+        FAIL and attempt 6 PASS with the argument between them, rather than one
+        tidy green.
         """
         execution = store.get_node(session, run, node_id)
         node = self._node(node_id)
         if execution is None or node is None:
             raise SchedulerError(f"run has no node '{node_id}'")
-        if execution.status is not NodeStatus.ERRORED:
+        if execution.status not in (NodeStatus.ERRORED, NodeStatus.FAILED):
             raise SchedulerError(
-                f"'{node_id}' is {execution.status}, not errored. Re-checking without "
-                f"re-doing the work is only honest when the check could not be "
-                f"performed; failed work has to be redone"
+                f"'{node_id}' is {execution.status}, not errored or failed. There is no "
+                f"verdict to re-check"
+            )
+        if execution.status is NodeStatus.FAILED and not (reason and by):
+            raise SchedulerError(
+                f"'{node_id}' FAILED — its checks were performed and answered. Re-checking "
+                f"that needs --by and --why on the record, naming what changed about the "
+                f"question. Without one, redo the work with `retry`"
             )
 
         previous = _latest_gate(execution)
         if previous is None or node.gate is None:
             raise SchedulerError(f"'{node_id}' has no recorded gate to re-evaluate")
 
-        unperformed = [
-            check
-            for check in node.gate.checks
-            if str(check) in {c["check"] for c in previous.checks if c["verdict"] == "error"}
-        ]
-        if not unperformed:
-            raise SchedulerError(f"'{node_id}' recorded no unperformed checks")
-
         inputs = self._inputs(session, run, node)
         facts = self._verify(node, inputs)
+
+        if execution.status is NodeStatus.FAILED:
+            # Every check the re-run checks can actually speak to. The worker is
+            # not re-run, so its facts — `session.files_written`, an exit code
+            # from the work itself — are gone; a check reading one of those would
+            # ERROR on a technicality and destroy the verdict it already had.
+            reconsider = [c for c in node.gate.checks if _answerable(c, facts)]
+            evaluator = f"orchestrator.gates (re-checked by {by}: {reason})"
+        else:
+            unperformed = {c["check"] for c in previous.checks if c["verdict"] == "error"}
+            reconsider = [c for c in node.gate.checks if str(c) in unperformed]
+            evaluator = "orchestrator.gates (re-checked)"
+            if not reconsider:
+                raise SchedulerError(f"'{node_id}' recorded no unperformed checks")
         fresh = evaluate_gate(
-            Gate(all_checks=unperformed),
+            Gate(all_checks=reconsider),
             facts,
             registry=self.registry,
             context=self._context(session, run, node),
@@ -692,7 +723,7 @@ class Scheduler:
             session,
             attempt,
             verdict=str(verdict),
-            evaluator="orchestrator.gates (re-checked)",
+            evaluator=evaluator,
             checks=[
                 {
                     "check": check.check,
@@ -705,9 +736,37 @@ class Scheduler:
         )
         store.finish_attempt(session, attempt, status=_status_for(verdict))
         self._apply_policy(session, run, node, execution, verdict, attempt.number, facts)
+
+        if verdict is Verdict.PASS:
+            self._retire_escalations(session, run, node_id, evaluator)
         session.flush()
 
-        return GateResult(verdict=verdict, checks=merged, evaluator="re-checked")
+        return GateResult(verdict=verdict, checks=merged, evaluator=evaluator)
+
+    def _retire_escalations(
+        self, session: Session, run: Run, node_id: str, why: str
+    ) -> None:
+        """Close the handoffs this node's failures opened, once it passes.
+
+        An escalation asks a person to decide about a verdict. When that verdict
+        is superseded the question is moot, and leaving it pending would block
+        release on a decision nobody can meaningfully make — G10 counts open
+        approvals, and the operator would be approving a state that no longer
+        exists.
+        """
+        for execution in store.all_nodes(session, run):
+            if not execution.node_id.startswith(f"escalate:{node_id}#"):
+                continue
+            execution.status = NodeStatus.SKIPPED
+            for approval in run.approvals:
+                if approval.node_id == execution.node_id and approval.decision is Decision.PENDING:
+                    recorder.decide(
+                        session,
+                        approval,
+                        decision=Decision.REJECTED,
+                        decided_by="engine",
+                        note=f"moot: {node_id} passed on re-check. {why}",
+                    )
 
     # ----------------------------------------------------------------- #
     # invalidation
@@ -781,6 +840,22 @@ class Scheduler:
                 stop_reason=f"no node can advance; stuck: {[n.node_id for n in unfinished]}",
             )
         return run
+
+
+def _answerable(check: GateCheck, facts: FactSet) -> bool:
+    """Whether re-running the node's checks can speak to this one.
+
+    A predicate reads run state, so it always can. An expression can only be
+    re-decided if the re-run produced the fact it names — otherwise the check
+    was answered by the worker, which has not run again.
+    """
+    if not isinstance(check, ExpressionCheck):
+        return True
+    try:
+        path, _, _ = expressions.parse(check.expression)
+    except expressions.ExpressionError:
+        return False
+    return path in facts
 
 
 def _latest_gate(execution):

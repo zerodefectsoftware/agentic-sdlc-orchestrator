@@ -365,6 +365,7 @@ nodes:
     kind: tool
     stage: implementation
     run: sh:make
+    retry_budget: 0            # one verdict per test, not a retry loop
     verify:
       - sh:coverage
     gate:
@@ -380,9 +381,9 @@ def observed(percent: float) -> WorkerResult:
 
 
 def errored_build(session, tmp_path, worker):
-    """A run whose gate could not be evaluated: the check produced no fact."""
+    """A build whose gate reached a blocking verdict, however the stub scripted it."""
     scheduler, run = run_plan(session, plan_from(tmp_path, UNCHECKABLE), worker)
-    assert statuses(session, run)["build"] is NodeStatus.ERRORED
+    assert statuses(session, run)["build"] in (NodeStatus.ERRORED, NodeStatus.FAILED)
     return scheduler, run
 
 
@@ -431,14 +432,55 @@ def test_recheck_carries_forward_the_verdicts_that_were_reached(session, tmp_pat
     assert [str(check.verdict) for check in result.checks] == ["pass", "fail"]
 
 
-def test_recheck_refuses_a_node_that_failed(session, tmp_path):
-    """It can turn "could not tell" into an answer, never "no" into "yes"."""
+def test_recheck_refuses_a_failed_node_with_nothing_on_the_record(session, tmp_path):
+    """Re-asking a question that was answered needs a reason, named and attributed."""
     worker = StubWorker({"build": scripts.failing("make")})
     scheduler, run = run_plan(session, plan_from(tmp_path, LINEAR), worker)
     assert statuses(session, run)["build"] is NodeStatus.FAILED
 
-    with pytest.raises(SchedulerError, match="failed work has to be redone"):
+    with pytest.raises(SchedulerError, match="needs --by and --why"):
         scheduler.revalidate(session, run, "build")
+
+
+def test_a_failed_gate_can_be_re_checked_when_the_question_changed(session, tmp_path):
+    """A check that answered "no" is worth asking again when the *question* changed.
+
+    Here the verify command was scoped to the wrong tree, so the architect's
+    gate failed on an import order in a suite it is frozen out of. Waiving past
+    that would record a human accepting a defect that never existed.
+    """
+    worker = StubWorker(
+        {"build": scripts.passing("make"), "build#verify0": observed(12)}
+    )
+    scheduler, run = errored_build(session, tmp_path, worker)
+    assert statuses(session, run)["build"] is NodeStatus.FAILED
+
+    scheduler.worker = StubWorker({"build#verify0": observed(91)})
+    result = scheduler.revalidate(
+        session, run, "build", by="ops", reason="the check linted the wrong tree"
+    )
+
+    assert result.verdict is Verdict.PASS
+    assert statuses(session, run)["build"] is NodeStatus.PASSED
+    assert "ops" in result.evaluator and "wrong tree" in result.evaluator
+
+
+def test_the_superseded_verdict_keeps_its_own_attempt(session, tmp_path):
+    """The safeguard is the record, not refusal: both verdicts stay readable."""
+    worker = StubWorker(
+        {"build": scripts.passing("make"), "build#verify0": observed(12)}
+    )
+    scheduler, run = errored_build(session, tmp_path, worker)
+
+    scheduler.worker = StubWorker({"build#verify0": observed(91)})
+    scheduler.revalidate(session, run, "build", by="ops", reason="wrong tree")
+
+    verdicts = [
+        record.verdict
+        for attempt in store.get_node(session, run, "build").attempts
+        for record in attempt.gate_records
+    ]
+    assert verdicts == ["fail", "pass"]
 
 
 def test_recheck_that_still_cannot_check_stays_an_error(session, tmp_path):
