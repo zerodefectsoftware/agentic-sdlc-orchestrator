@@ -20,7 +20,7 @@ from orchestrator.config import get_settings, reset_settings
 from orchestrator.lineage import recorder
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
-from orchestrator.state.models import NodeStatus, Run, RunStatus
+from orchestrator.state.models import Decision, NodeStatus, Run, RunStatus
 
 PLAN = """
 plan: demo
@@ -590,3 +590,29 @@ def test_withdrawing_a_result_withdraws_what_was_built_on_it(cli, workspace):
         run = session.get(Run, run_id)
         assert store.get_node(session, run, "design").status is NodeStatus.PENDING
         assert store.get_node(session, run, "design-approval").status is NodeStatus.STALE
+
+
+def test_withdrawing_a_result_reopens_the_checkpoint_waiting_on_it(cli, workspace):
+    """A blocked checkpoint is waiting to approve versions that are being replaced.
+
+    Left BLOCKED it is neither PENDING nor STALE, so nothing collects it and
+    nothing re-asks — the run wedges the moment the withdrawn node passes again.
+    Its open request goes with it: a decision on a superseded version is not a
+    decision anyone should be held to.
+    """
+    start(cli, workspace)
+    with store.Store().session() as session:
+        run_id = session.scalars(select(Run)).all()[-1].id
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "design-approval").status is NodeStatus.BLOCKED
+        assert [a for a in run.approvals if a.decision is Decision.PENDING]
+
+    invoke(
+        cli, workspace, "invalidate", run_id, "design",
+        "--by", "ops", "--why", "the design predates the stub packages",
+    )
+
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "design-approval").status is NodeStatus.STALE
+        assert not [a for a in run.approvals if a.decision is Decision.PENDING]

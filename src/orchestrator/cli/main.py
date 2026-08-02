@@ -624,11 +624,33 @@ def invalidate(
             # its old output keeps its green — and the downstream node that
             # would consume the *new* output is still PASSED, so it is never
             # collected and never sees it.
+            #
+            # BLOCKED counts too, and for a sharper reason: a checkpoint waiting
+            # on a person is waiting to approve artifact versions that are being
+            # replaced. Left blocked it is never collected and never re-asked,
+            # so the run wedges the moment the withdrawn node passes again. Its
+            # open request is withdrawn with it — a decision on a superseded
+            # version is not a decision anyone should be held to.
             for descendant in sorted(nx.descendants(graph, node_id)):
                 downstream = store.get_node(session, run, descendant)
-                if downstream is not None and downstream.status is NodeStatus.PASSED:
-                    downstream.status = NodeStatus.STALE
-                    console.print(f"[dim]  stale[/dim] {descendant} — built on it")
+                if downstream is None or downstream.status not in (
+                    NodeStatus.PASSED,
+                    NodeStatus.BLOCKED,
+                ):
+                    continue
+
+                for approval in run.approvals:
+                    if approval.node_id == descendant and approval.decision is Decision.PENDING:
+                        recorder.decide(
+                            session,
+                            approval,
+                            decision=Decision.REJECTED,
+                            decided_by=by,
+                            note=f"request withdrawn with {node_id}: {why}",
+                        )
+
+                downstream.status = NodeStatus.STALE
+                console.print(f"[dim]  stale[/dim] {descendant} — built on it")
 
         run.status = RunStatus.RUNNING
         run.stop_reason = None
