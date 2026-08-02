@@ -670,6 +670,14 @@ def invalidate(
                 console.print(f"[dim]  re-entering[/dim] {owned} — its work belongs to {node_id}")
                 _retire_escalations(session, run, owned, by, why)
 
+            # Drop the acquired edges as well, so the owner is collected *before*
+            # the work it owns and can re-derive it. Left in place, the children
+            # have no unmet dependency and dispatch in the same wave their parent
+            # is still waiting in — from the definition persisted when they were
+            # first created. Two implementers were judged by a gate the plan had
+            # already replaced, because nothing had re-derived them yet.
+            execution.extra_needs = []
+
             # A result computed from something withdrawn is not evidence (§6).
             # Without this the withdrawn node re-runs while everything built on
             # its old output keeps its green — and the downstream node that
