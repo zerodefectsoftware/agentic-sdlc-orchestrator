@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import math
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -310,7 +310,7 @@ def create_app() -> FastAPI:
         try:
             analytics.record_click(
                 link.code,
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
                 referrer=request.headers.get("referer"),
                 user_agent=request.headers.get("user-agent"),
             )

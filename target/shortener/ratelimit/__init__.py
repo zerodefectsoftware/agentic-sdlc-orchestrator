@@ -78,9 +78,7 @@ def enforce_rate_limit(client_key: str) -> RateLimitDecision:
         _buckets[client_key] = (tokens, now)
 
     if allowed:
-        return RateLimitDecision(
-            allowed=True, remaining=int(tokens), retry_after=0.0
-        )
+        return RateLimitDecision(allowed=True, remaining=int(tokens), retry_after=0.0)
 
     # The wait until the bucket holds one whole token — the only number a
     # refused client can actually act on (AC5.4).
@@ -98,10 +96,6 @@ def _forget_refilled_buckets(now: float, window: float) -> None:
     capacity, so keeping its bucket would only reserve memory for a state the
     default already describes.
     """
-    idle = [
-        key
-        for key, (_, charged_at) in _buckets.items()
-        if now - charged_at >= window
-    ]
+    idle = [key for key, (_, charged_at) in _buckets.items() if now - charged_at >= window]
     for key in idle:
         del _buckets[key]

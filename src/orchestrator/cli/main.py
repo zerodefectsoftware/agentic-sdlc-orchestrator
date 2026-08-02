@@ -13,6 +13,7 @@ hours is not a checkpoint.
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import time
@@ -666,8 +667,15 @@ def invalidate(
                 row = store.get_node(session, run, owned)
                 if row is None or row.status is NodeStatus.PENDING:
                     continue
-                row.status = NodeStatus.PENDING
-                console.print(f"[dim]  re-entering[/dim] {owned} — its work belongs to {node_id}")
+                # SKIPPED, not PENDING. Reclaimed work must not be collectable
+                # until its owner has re-derived it: a fan-out child has no
+                # dependencies of its own, so leaving it PENDING put it in the
+                # *same wave* as the parent that was about to redefine it, and it
+                # ran from the definition it was loaded with. Two implementers
+                # were judged by a gate two plan revisions old. `_expand` resets
+                # these to PENDING once it has refreshed them.
+                row.status = NodeStatus.SKIPPED
+                console.print(f"[dim]  reclaimed[/dim] {owned} — {node_id} will re-derive it")
                 _retire_escalations(session, run, owned, by, why)
 
             # Drop the acquired edges as well, so the owner is collected *before*
@@ -747,6 +755,9 @@ def watch(
     until_done: Annotated[
         bool, typer.Option("--until-done", help="Exit when the run stops, instead of following")
     ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Every check, not just the ones that blocked")
+    ] = False,
 ) -> None:
     """Follow a run as it executes. Open this in a second terminal.
 
@@ -796,6 +807,16 @@ def watch(
                 seen_status[execution.node_id] = status
 
                 for attempt in execution.attempts:
+                    key = f"attempt:{attempt.id}"
+                    if key not in seen_gates:
+                        seen_gates.add(key)
+                        if not first:
+                            spent = attempt.model or attempt.worker
+                            effort = f"/{attempt.effort}" if attempt.effort else ""
+                            console.print(
+                                f"    [dim]attempt {attempt.number} · {spent}{effort}[/dim]"
+                            )
+
                     for record in attempt.gate_records:
                         if record.id in seen_gates:
                             continue
@@ -806,18 +827,42 @@ def watch(
                             f"{execution.node_id} [dim]({record.evaluator})[/dim]"
                         )
                         for check in record.checks:
-                            if check["verdict"] == "pass":
+                            passed = check["verdict"] == "pass"
+                            if passed and not verbose:
                                 continue
+                            colour = "green" if passed else "red"
+                            observed = check.get("observed")
                             console.print(
-                                f"      [red]{check['verdict']}[/red] {check['check']} "
-                                f"[dim]{str(check.get('detail') or '')[:90]}[/dim]"
+                                f"      [{colour}]{check['verdict']}[/{colour}] {check['check']}"
+                                + (f" [dim]= {observed}[/dim]" if observed else "")
+                                + (
+                                    ""
+                                    if passed
+                                    else f" [dim]{str(check.get('detail') or '')[:80]}[/dim]"
+                                )
                             )
 
             for artifact in sorted(run.artifacts, key=lambda a: a.created_at):
                 if artifact.id in seen_artifacts:
                     continue
                 seen_artifacts.add(artifact.id)
-                console.print(f"    [cyan]artifact[/cyan] {artifact.name}@v{artifact.version}")
+                if not first:
+                    console.print(
+                        f"    [cyan]artifact[/cyan] {artifact.name}@v{artifact.version}"
+                    )
+                # A changeset carries what the scope guard allowed and refused.
+                # A denied write is D7 actually happening, and it is the most
+                # interesting line in the whole stream — worth surfacing rather
+                # than leaving in an artifact somebody reads afterwards.
+                if artifact.name.endswith(".changeset") and artifact.path:
+                    try:
+                        body = json.loads(Path(artifact.path).read_text())
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    for path in body.get("written", [])[:6]:
+                        console.print(f"      [dim]wrote[/dim] {path}")
+                    for path in body.get("denied", []):
+                        console.print(f"      [red]refused[/red] {path} [dim]out of scope[/dim]")
 
             for approval in run.approvals:
                 key = f"approval:{approval.id}:{approval.decision}"
