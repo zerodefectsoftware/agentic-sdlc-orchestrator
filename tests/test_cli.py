@@ -592,6 +592,35 @@ def test_withdrawing_a_result_withdraws_what_was_built_on_it(cli, workspace):
         assert store.get_node(session, run, "design-approval").status is NodeStatus.STALE
 
 
+def test_withdrawing_a_result_retires_the_questions_it_raised(cli, workspace):
+    """An escalation asks about a verdict. Withdraw the verdict and it is moot.
+
+    Escalations are *inserted* nodes, so they are not in the plan graph the
+    cascade walks — nothing closed them, and the run then blocked on a question
+    about an attempt that no longer existed, before it could reach the node it
+    had just been told to re-run. Three of them cost four attempts.
+    """
+    start(cli, workspace)
+    with store.Store().session() as session:
+        run_id = session.scalars(select(Run)).all()[-1].id
+        run = session.get(Run, run_id)
+        store.insert_node(session, run, "escalate:build#1", "human", "implementation", {})
+        recorder.request_approval(session, run, node_id="escalate:build#1", artifacts=[])
+        session.commit()
+
+    output = invoke(
+        cli, workspace, "invalidate", run_id, "build",
+        "--by", "ops", "--why", "the build output was wrong",
+    )
+
+    assert "retired" in output
+    with store.Store().session() as session:
+        run = session.get(Run, run_id)
+        assert store.get_node(session, run, "escalate:build#1").status is NodeStatus.SKIPPED
+        open_now = [a for a in run.approvals if a.decision is Decision.PENDING]
+        assert not [a for a in open_now if a.node_id == "escalate:build#1"]
+
+
 def test_withdrawing_a_result_reopens_the_work_that_failed_on_it(cli, workspace):
     """A FAIL computed from a withdrawn input is as much not-evidence as a PASS.
 

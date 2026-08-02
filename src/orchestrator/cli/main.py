@@ -96,6 +96,36 @@ def _registry() -> PredicateRegistry:
     return register_all(PredicateRegistry())
 
 
+def _retire_escalations(session, run: Run, node_id: str, by: str, why: str) -> None:
+    """Close the handoffs a withdrawn node's failures opened.
+
+    An escalation asks a person to decide about a verdict. Withdraw the verdict
+    and the question is moot — but it is an *inserted* node, so it is not in the
+    plan graph the cascade walks, and nothing was closing it. The run then
+    blocked on a question about an attempt that no longer existed, before it
+    could reach the node it had just been told to re-run.
+
+    SKIPPED rather than STALE: STALE means "do this again", and re-asking a
+    question whose subject was withdrawn is the one thing that must not happen.
+    """
+    for execution in store.all_nodes(session, run):
+        if not execution.node_id.startswith(f"escalate:{node_id}#"):
+            continue
+        if execution.status is NodeStatus.SKIPPED:
+            continue
+        execution.status = NodeStatus.SKIPPED
+        console.print(f"[dim]  retired[/dim] {execution.node_id} — its verdict was withdrawn")
+        for approval in run.approvals:
+            if approval.node_id == execution.node_id and approval.decision is Decision.PENDING:
+                recorder.decide(
+                    session,
+                    approval,
+                    decision=Decision.REJECTED,
+                    decided_by=by,
+                    note=f"moot: {node_id} withdrawn. {why}",
+                )
+
+
 def _latest_run(session) -> Run:
     run = session.scalar(select(Run).order_by(Run.started_at.desc()).limit(1))
     if run is None:
@@ -664,6 +694,9 @@ def invalidate(
 
                 downstream.status = NodeStatus.STALE
                 console.print(f"[dim]  stale[/dim] {descendant} — built on it")
+                _retire_escalations(session, run, descendant, by, why)
+
+            _retire_escalations(session, run, node_id, by, why)
 
         run.status = RunStatus.RUNNING
         run.stop_reason = None
