@@ -40,7 +40,7 @@ from orchestrator.gates import CheckResult, GateResult, Verdict, evaluate_gate, 
 from orchestrator.gates.facts import FactSet
 from orchestrator.gates.registry import PredicateContext, PredicateRegistry
 from orchestrator.gates.registry import registry as default_registry
-from orchestrator.lineage import recorder
+from orchestrator.lineage import query, recorder
 from orchestrator.policy.failure import Action, escalation_node, respond_to
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
@@ -862,7 +862,33 @@ class Scheduler:
             execution = store.get_node(session, run, descendant)
             if execution is not None and execution.status is NodeStatus.PASSED:
                 execution.status = NodeStatus.STALE
+
+        self._reopen_stale_approvals(session, run)
         session.flush()
+
+    def _reopen_stale_approvals(self, session: Session, run: Run) -> None:
+        """Re-ask a question whose subject was replaced (D10).
+
+        A bound approval going stale was detected at the release gate and never
+        acted on: `revert_to_pending` existed, was exported, and was called from
+        nowhere. So a run could be blocked by "you approved v2 and v4 now exists"
+        with no pending decision anywhere to answer — the gate knew, and the
+        person it needed could not be asked.
+
+        Reverting is not deletion. The original decision stays in the trail with
+        the reason it stopped counting, and the checkpoint re-enters the graph so
+        it blocks and asks again against the version that actually exists.
+        """
+        for stale in query.stale_approvals(session, run):
+            recorder.revert_to_pending(
+                session,
+                stale.approval,
+                f"{stale.artifact_name}@v{stale.approved_version} was superseded "
+                f"by v{stale.current_version}",
+            )
+            execution = store.get_node(session, run, stale.approval.node_id)
+            if execution is not None and execution.status is NodeStatus.PASSED:
+                execution.status = NodeStatus.STALE
 
     # ----------------------------------------------------------------- #
     # helpers

@@ -1110,3 +1110,33 @@ def test_a_first_attempt_is_told_nothing(db, tmp_path):
         scheduler.advance(session, run)
 
     assert seen and all("previous_attempt" not in call for call in seen)
+
+
+def test_a_superseded_approval_is_re_asked_not_merely_noticed(session, tmp_path):
+    """D10, end to end. Detecting staleness and never acting on it is worse than
+    not detecting it: the release gate blocks on "you approved v2 and v4 exists"
+    while no pending decision exists anywhere to answer.
+    """
+    worker = StubWorker(
+        {"build": scripts.passing("make"), "verify": scripts.passing("pytest")}
+    )
+    scheduler, run = run_plan(session, plan_from(tmp_path, LINEAR), worker)
+
+    build = scheduler.plan.node("build")
+    object.__setattr__(build, "outputs", ["design.spec"])
+    first = recorder.record_artifact(session, run, name="design.spec", content="v1")
+    approval = recorder.decide(
+        session,
+        recorder.request_approval(session, run, node_id="verify", artifacts=[first]),
+        decision=Decision.APPROVED,
+        decided_by="alice",
+    )
+    store.get_node(session, run, "verify").status = NodeStatus.PASSED
+    recorder.record_artifact(session, run, name="design.spec", content="v2")
+    session.flush()
+
+    scheduler._invalidate_downstream(session, run, build)
+
+    assert approval.decision is Decision.PENDING
+    assert "superseded" in approval.note
+    assert statuses(session, run)["verify"] is NodeStatus.STALE
