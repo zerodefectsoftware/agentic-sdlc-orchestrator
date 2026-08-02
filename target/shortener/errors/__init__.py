@@ -21,11 +21,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class ErrorEnvelope(BaseModel):
     """The body of every non-2xx response: machine-readable code, message, details."""
+
+    # A13 fixed one shape for every failure, and this is where "one shape" is
+    # enforced rather than merely described: a caller that hands the envelope a
+    # fourth field is refused here, not in whatever client discovers later that
+    # the error format grew.
+    model_config = ConfigDict(extra="forbid")
 
     code: str
     message: str
@@ -107,6 +113,9 @@ class RateLimitedError(AppError):
         details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message, details=details)
+        # The seconds `main` reports as Retry-After. Carried on the exception
+        # rather than in `details` because a client acts on it, and a number
+        # buried in a free-form dict is a number nobody parses (AC5.4).
         self.retry_after = retry_after
 
 

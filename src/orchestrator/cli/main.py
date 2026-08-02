@@ -98,6 +98,37 @@ def _registry() -> PredicateRegistry:
     return register_all(PredicateRegistry())
 
 
+def _doing(session, run: Run) -> str:
+    """What a run is actually doing, for the heartbeat.
+
+    "idle" has to mean *nothing is happening*, and it did not: a run waiting on
+    a person reported idle, as did a fan-out reshaping the graph, because
+    neither `human` nor `fanout` is ever marked RUNNING — correctly, since
+    neither does work. But a watcher cannot tell a stalled run from one waiting
+    on a decision only it can make, and that is the difference that matters when
+    somebody is looking at the screen.
+    """
+    waiting = sorted(
+        approval.node_id
+        for approval in run.approvals
+        if approval.decision is Decision.PENDING
+    )
+    if waiting:
+        return f"blocked — awaiting your decision on {', '.join(waiting)}"
+
+    busy = sorted(
+        node.node_id
+        for node in store.all_nodes(session, run)
+        if node.status is NodeStatus.RUNNING
+    )
+    if busy:
+        return f"{len(busy)} running: {', '.join(busy)}"
+
+    if run.status is not RunStatus.RUNNING:
+        return f"{run.status} — nothing further will happen without you"
+    return "between waves"
+
+
 def _retire_escalations(session, run: Run, node_id: str, by: str, why: str) -> None:
     """Close the handoffs a withdrawn node's failures opened.
 
@@ -885,18 +916,10 @@ def watch(
 
             # A long wave is silence, and silence is indistinguishable from a
             # hung watcher. Say what is still out, and for how long.
-            if run.status is RunStatus.RUNNING and time.monotonic() - last_event > 30:
-                busy = sorted(
-                    n.node_id
-                    for n in store.all_nodes(session, run)
-                    if n.status is NodeStatus.RUNNING
-                )
+            if time.monotonic() - last_event > 30:
                 elapsed = int(time.monotonic() - started)
-                console.print(
-                    f"  [dim]· {elapsed // 60}m{elapsed % 60:02d}s — "
-                    + (f"{len(busy)} running: {', '.join(busy)}" if busy else "idle")
-                    + "[/dim]"
-                )
+                stamp = f"{elapsed // 60}m{elapsed % 60:02d}s"
+                console.print(f"  [dim]· {stamp} — {_doing(session, run)}[/dim]")
                 last_event = time.monotonic()
 
         first = False
