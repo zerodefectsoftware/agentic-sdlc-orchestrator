@@ -98,7 +98,11 @@ def _registry() -> PredicateRegistry:
     return register_all(PredicateRegistry())
 
 
-def _ask_here(pending: list, by: str | None) -> list[tuple[str, Decision, str | None]]:
+def _ask_here(
+    pending: list,
+    by: str | None,
+    questions: list[tuple[str, str, str]] | None = None,
+) -> list[tuple[str, Decision, str | None]]:
     """Answer a checkpoint from the terminal that is already watching the run.
 
     `watch` can only tell you a decision is needed; answering it meant switching
@@ -119,6 +123,36 @@ def _ask_here(pending: list, by: str | None) -> list[tuple[str, Decision, str | 
         console.print(f"\n[bold cyan]decision needed[/bold cyan] on {approval.node_id}")
         for binding in approval.bindings:
             console.print(f"  covers [bold]{binding.artifact.ref}[/bold]")
+
+        # A checkpoint that asks open questions should ask them, one at a time,
+        # rather than demand a note in a line format nothing documents. The
+        # answers are assembled into that format here, where the shape is the
+        # machine's problem and not the person's.
+        if questions and not approval.bindings:
+            _show_questions(questions)
+            answer = typer.prompt(
+                "  [a]nswer / [r]eject / [s]kip", default="s"
+            ).strip().lower()
+            if answer.startswith("s"):
+                console.print("[dim]  left open — the run stays blocked[/dim]")
+                continue
+            if answer.startswith("r"):
+                answers.append(
+                    (approval.node_id, Decision.REJECTED, typer.prompt("  why", default=""))
+                )
+                continue
+
+            lines = []
+            for ident, severity, question in questions:
+                console.print(f"\n  [yellow]{ident}[/yellow] [dim]({severity})[/dim] {question}")
+                said = typer.prompt("    your answer", default="").strip()
+                if said:
+                    lines.append(f"{ident}: {said}")
+            if not lines:
+                console.print("[dim]  nothing answered — left open[/dim]")
+                continue
+            answers.append((approval.node_id, Decision.APPROVED, "\n".join(lines)))
+            continue
 
         answer = typer.prompt("  [a]pprove / [r]eject / [s]kip", default="s").strip().lower()
         if answer.startswith("s"):
@@ -226,6 +260,40 @@ def _show(run_id: str) -> None:
         _report(session, session.get(Run, run_id))
 
 
+def _open_questions(session, run: Run) -> list[tuple[str, str, str]]:
+    """The ambiguities a checkpoint is actually asking about.
+
+    A checkpoint that says only "awaiting clarify-with-human" asks a person to
+    go and find the questions themselves, then answer them in a format nothing
+    tells them about. The questions are in the register; show them.
+    """
+    from orchestrator.artifacts import RequirementRegister
+
+    artifact = recorder.latest(session, run, "intake.register")
+    if artifact is None:
+        return []
+    try:
+        register = RequirementRegister.model_validate_json(ArtifactStore().read(artifact))
+    except (OSError, ValueError):
+        return []
+    return [
+        (a.id, str(a.severity), a.question)
+        for a in register.ambiguities
+        if not a.is_disposed
+    ]
+
+
+def _show_questions(questions: list[tuple[str, str, str]]) -> None:
+    console.print("\n  [bold]open questions[/bold]")
+    for ident, severity, question in questions:
+        console.print(f"    [yellow]{ident}[/yellow] [dim]({severity})[/dim] {question}")
+    console.print(
+        "\n  [dim]answer one per line, starting with the id:[/dim]\n"
+        "  [dim]    A1: 302, so browsers do not cache the redirect[/dim]\n"
+        "  [dim]anything not in that shape is applied to every open question.[/dim]"
+    )
+
+
 def _report(session, run: Run) -> None:
     """Print where a run stands, and what to do next."""
     colour = {"completed": "green", "blocked": "cyan"}.get(str(run.status), "yellow")
@@ -241,6 +309,9 @@ def _report(session, run: Run) -> None:
         console.print(f"\n[cyan]awaiting decision[/cyan] on [bold]{approval.node_id}[/bold]")
         for binding in approval.bindings:
             console.print(f"  covers [bold]{binding.artifact.ref}[/bold]")
+        questions = _open_questions(session, run) if not approval.bindings else []
+        if questions:
+            _show_questions(questions)
         console.print(
             f"\n  [dim]orchestrator approve {run.id} {approval.node_id} --by <you>[/dim]"
         )
@@ -951,7 +1022,7 @@ def watch(
             if decide and run.status is RunStatus.BLOCKED:
                 pending = [a for a in run.approvals if a.decision is Decision.PENDING]
                 if pending:
-                    answers = _ask_here(pending, by)
+                    answers = _ask_here(pending, by, _open_questions(session, run))
                     target = run.id
                     break
 
