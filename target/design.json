@@ -1,0 +1,673 @@
+{
+  "elements": [
+    {
+      "id": "E1",
+      "kind": "endpoint",
+      "summary": "POST /api/links — validate a submitted URL, mint a code, persist it, and return 201 with the short URL, the code and the long URL; 400 with an error envelope when the URL is missing, relative or not http/https.",
+      "satisfies": ["R1"]
+    },
+    {
+      "id": "E2",
+      "kind": "endpoint",
+      "summary": "GET /{code} — the redirect path: resolve the code, queue the click, and answer 301 with Location set byte-identically to the stored long URL; 404 when never issued, 410 when deleted or expired.",
+      "satisfies": ["R2"]
+    },
+    {
+      "id": "E3",
+      "kind": "endpoint",
+      "summary": "GET /api/links/{code} — link metadata: long URL, creation timestamp and current total click count, composed from links.get_link and analytics.total_clicks; 404 when the code was never issued.",
+      "satisfies": ["R3"]
+    },
+    {
+      "id": "E4",
+      "kind": "endpoint",
+      "summary": "DELETE /api/links/{code} — retire a code with 204, idempotently; the redirect path answers 410 afterwards and the code is never reissued.",
+      "satisfies": ["R3"]
+    },
+    {
+      "id": "E5",
+      "kind": "endpoint",
+      "summary": "GET /api/links/{code}/analytics — total clicks, per-interval counts over a [start, end) window, and breakdowns by referrer and by device/browser class; 404 for a code that does not exist, disclosing nothing.",
+      "satisfies": ["R4"]
+    },
+    {
+      "id": "E6",
+      "kind": "endpoint",
+      "summary": "GET /health — 200 while the datastore the redirect path needs is reachable, non-2xx otherwise, so a load balancer can stop sending traffic to an instance that cannot redirect.",
+      "satisfies": ["R5"]
+    },
+    {
+      "id": "E7",
+      "kind": "model",
+      "summary": "Link / LinkRow — code, long URL, created_at, expires_at, deleted_at; the long URL is stored and returned exactly as submitted because AC2.1 compares Location byte-for-byte, so nothing normalises it.",
+      "satisfies": ["R1", "R2", "R3"]
+    },
+    {
+      "id": "E8",
+      "kind": "model",
+      "summary": "ClickRow — one row per successful redirect: code, occurred_at, referrer, user-agent, and the device and browser classes inferred at write time so a breakdown is a GROUP BY rather than a scan.",
+      "satisfies": ["R4"]
+    },
+    {
+      "id": "E9",
+      "kind": "model",
+      "summary": "ErrorEnvelope — the single non-2xx body {code, message, details}, with the HTTP status carried as a class attribute of each AppError subclass so services choose statuses without importing HTTP.",
+      "satisfies": ["R1", "R3", "R4", "R5"]
+    },
+    {
+      "id": "E10",
+      "kind": "model",
+      "summary": "ClickSummary / AnalyticsResponse — total_clicks, series of {start, count}, and referrer, device and browser breakdowns of {value, count}, all scoped to the requested window so the series sums to the total.",
+      "satisfies": ["R4"]
+    },
+    {
+      "id": "E11",
+      "kind": "model",
+      "summary": "Settings — every tunable (datastore URL, public base URL, rate-limit budget, analytics queue and drain sizing, host denylist) read from SHORTENER_-prefixed environment variables, so deployment and tests change behaviour without a code change.",
+      "satisfies": ["R1", "R5"]
+    },
+    {
+      "id": "E12",
+      "kind": "module",
+      "summary": "errors — the exception hierarchy and error envelope every other module raises through; it is the root of the dependency graph and depends on nothing.",
+      "satisfies": ["R1", "R3", "R4", "R5"]
+    },
+    {
+      "id": "E13",
+      "kind": "module",
+      "summary": "config — the Settings object and its single accessor; no I/O at import time.",
+      "satisfies": ["R1", "R5"]
+    },
+    {
+      "id": "E14",
+      "kind": "module",
+      "summary": "codes — base62 code minting and validation, deliberately ignorant of storage: uniqueness is the datastore's invariant, so links mints here and checks there.",
+      "satisfies": ["R1"]
+    },
+    {
+      "id": "E15",
+      "kind": "module",
+      "summary": "storage — schema, connections, link persistence, click insertion and the reachability probe; every row leaves as a frozen dataclass so no caller can touch a closed connection.",
+      "satisfies": ["R1", "R2", "R3", "R5"]
+    },
+    {
+      "id": "E16",
+      "kind": "module",
+      "summary": "links — the link lifecycle: URL validation, code minting with collision retry, resolution for the redirect path, metadata lookup and soft deletion.",
+      "satisfies": ["R1", "R2", "R3"]
+    },
+    {
+      "id": "E17",
+      "kind": "module",
+      "summary": "analytics — asynchronous click recording and the bounded queries over it; it is the only module allowed to be eventually consistent.",
+      "satisfies": ["R4"]
+    },
+    {
+      "id": "E18",
+      "kind": "module",
+      "summary": "ratelimit — the per-caller token bucket and its decision type, isolated from HTTP so the key is a string the caller derives.",
+      "satisfies": ["R5"]
+    },
+    {
+      "id": "E19",
+      "kind": "module",
+      "summary": "main — the only module that knows HTTP: the app factory, the six routes, the request/response schemas, the error-envelope handler and the lifespan that opens storage and starts the analytics drain.",
+      "satisfies": ["R1", "R2", "R3", "R4", "R5"]
+    },
+    {
+      "id": "E20",
+      "kind": "decision",
+      "summary": "Redirects are 301 Permanent (A1), because a short link is a permanent identifier and caching it is the point. Accepted cost, documented rather than absorbed: cached redirects never reach the service, so click counts under-report real traffic and a deleted link stays followable for clients that already cached it.",
+      "satisfies": ["R2", "R4"]
+    },
+    {
+      "id": "E21",
+      "kind": "decision",
+      "summary": "No authentication and no multi-tenancy (A2): every endpoint, including delete and analytics, is anonymous. This is prototype scope, and the consequence — anyone who guesses a code can delete the link or read its analytics — is a README-level known risk, not an oversight.",
+      "satisfies": ["R3", "R4"]
+    },
+    {
+      "id": "E22",
+      "kind": "decision",
+      "summary": "One indexed relational datastore via SQLAlchemy Core, SQLite by default (A3): no sharding, no replication, no cache tier at ~10k links/day and 100 redirects/second. Core rather than the ORM because every row crosses the module boundary as a frozen dataclass, which removes lazy-loading after a closed connection as a failure mode for parallel implementers; the ORM's cost would be paid in exactly the module nobody owns end to end.",
+      "satisfies": ["R1", "R2", "R3", "R5"]
+    },
+    {
+      "id": "E23",
+      "kind": "decision",
+      "summary": "Short codes are 7 random base62 characters (62^7 ≈ 3.5e12), minted optimistically and retried against a unique primary key until a small attempt budget is spent, then CodeCollisionError. Random rather than sequential so the whole service is not enumerable; uniqueness is enforced by the datastore rather than by a read-then-write that can race.",
+      "satisfies": ["R1"]
+    },
+    {
+      "id": "E24",
+      "kind": "decision",
+      "summary": "Per-link expiry is in scope as an optional creation field with no service-wide default, and an expired code answers 410 Gone; custom aliases are out of scope (A4), because squatting, reservation and collision-with-generated-code are problems nothing in the register asks to solve.",
+      "satisfies": ["R1", "R2", "R3"]
+    },
+    {
+      "id": "E25",
+      "kind": "decision",
+      "summary": "Clicks are recorded asynchronously through a bounded in-process queue drained in batches, visible within 60 seconds (A6). This is what buys AC2.3's p95 and AC5.2's independence of the analytics store; the accepted cost is eventual consistency and the loss of whatever had not drained at a crash. The queue is bounded because an unbounded one trades a latency budget for memory it never gives back.",
+      "satisfies": ["R2", "R4", "R5"]
+    },
+    {
+      "id": "E26",
+      "kind": "decision",
+      "summary": "Deletion is soft (A7): the row survives with deleted_at set, the code is retired permanently and never reissued, redirects answer 410, and the link's clicks stay readable through the analytics API. Reuse would attribute new clicks to an old link's history.",
+      "satisfies": ["R3", "R4"]
+    },
+    {
+      "id": "E27",
+      "kind": "decision",
+      "summary": "Analytics store referrer and user-agent only — no IP, no geography, no unique-visitor deduplication (A8) — which keeps the service clear of personal-data retention obligations nobody asked about. A click is any successful redirect, crawlers included (A10); the user-agent breakdown is how an owner sees crawler traffic separately.",
+      "satisfies": ["R4"]
+    },
+    {
+      "id": "E28",
+      "kind": "decision",
+      "summary": "Rate limiting is a per-client-IP token bucket held in process, answering 429 with Retry-After and leaving other callers untouched (AC5.4). In-process because a shared limiter would add a second dependency on the redirect path, which is what AC5.2 and the p95 budget push against; the cost is that a second instance would grant a second full budget.",
+      "satisfies": ["R5"]
+    },
+    {
+      "id": "E29",
+      "kind": "decision",
+      "summary": "Analytics queries are bounded by construction (A11): breakdowns return the top 100 values plus an 'other' row, and a time series must name its window and may not exceed 366 buckets, refused with 400 otherwise. An unbounded breakdown over a multi-year window is a load source the service would point at itself.",
+      "satisfies": ["R4"]
+    },
+    {
+      "id": "E30",
+      "kind": "decision",
+      "summary": "Creation accepts only absolute http/https URLs and refuses any host equal to the service's own configured host, with an empty denylist left configurable (A12). Self-referential short URLs are redirect loops on the path with the tightest budget; third-party reputation screening stays out of scope.",
+      "satisfies": ["R1", "R2"]
+    },
+    {
+      "id": "E31",
+      "kind": "decision",
+      "summary": "Every non-2xx response uses one envelope, {code, message, details} (A13), produced by a single handler over an AppError hierarchy whose subclasses carry their own status. Clients parse one shape, and a new failure mode is a new exception class rather than a new response format.",
+      "satisfies": ["R1", "R3", "R4", "R5"]
+    },
+    {
+      "id": "E32",
+      "kind": "decision",
+      "summary": "Health reports only what redirects need — datastore reachability — and deliberately not the analytics recorder, since AC5.2 makes a failing recorder a healthy state for this service.",
+      "satisfies": ["R5"]
+    },
+    {
+      "id": "E33",
+      "kind": "decision",
+      "summary": "Submitting the same long URL twice mints a new code each time (A5). Deduplicating would merge the analytics of two campaigns that intended separate tracking, which corrupts R4 for the second caller; the cost is storage the design can afford at this scale.",
+      "satisfies": ["R1", "R4"]
+    }
+  ],
+  "modules": [
+    {
+      "name": "errors",
+      "path": "errors",
+      "responsibility": "The exception hierarchy every module raises through, and the single error envelope those exceptions render into. Depends on nothing."
+    },
+    {
+      "name": "config",
+      "path": "config",
+      "responsibility": "The Settings object read from SHORTENER_-prefixed environment variables, and the one accessor that constructs it. No I/O at import time."
+    },
+    {
+      "name": "codes",
+      "path": "codes",
+      "responsibility": "Minting and validating base62 short codes. Knows nothing about storage: it produces candidates, and links checks them for uniqueness."
+    },
+    {
+      "name": "storage",
+      "path": "storage",
+      "responsibility": "The datastore: schema, connections, link persistence, batched click insertion, and the reachability probe the health endpoint reads. Rows cross the boundary as frozen dataclasses."
+    },
+    {
+      "name": "links",
+      "path": "links",
+      "responsibility": "The link lifecycle: URL validation, code minting with collision retry, resolution for the redirect path, metadata lookup, and soft deletion."
+    },
+    {
+      "name": "analytics",
+      "path": "analytics",
+      "responsibility": "Asynchronous click recording off the redirect path, and the bounded queries that answer how often and when a link was visited."
+    },
+    {
+      "name": "ratelimit",
+      "path": "ratelimit",
+      "responsibility": "Per-caller request budgets as an in-process token bucket, returning a decision and raising when the budget is spent."
+    },
+    {
+      "name": "main",
+      "path": "main",
+      "responsibility": "The HTTP surface: app factory, the six routes, request/response schemas, the error-envelope handler, and the lifespan that opens storage and runs the analytics drain. The only module that imports FastAPI."
+    }
+  ],
+  "endpoints": [
+    "POST /api/links",
+    "GET /api/links/{code}",
+    "DELETE /api/links/{code}",
+    "GET /api/links/{code}/analytics",
+    "GET /health",
+    "GET /{code}"
+  ],
+  "interfaces": [
+    {
+      "module": "errors",
+      "depends_on": [],
+      "exports": [
+        {
+          "name": "ErrorEnvelope",
+          "kind": "class",
+          "summary": "Pydantic model for the body of every non-2xx response: code, message, optional details.",
+          "raises": []
+        },
+        {
+          "name": "AppError",
+          "kind": "exception",
+          "signature": "(message: str, *, code: str | None = None, details: dict[str, Any] | None = None) -> None",
+          "summary": "Base application error carrying a machine-readable `code` and an HTTP `status_code`; `to_envelope()` renders it.",
+          "raises": []
+        },
+        {
+          "name": "InvalidURLError",
+          "kind": "exception",
+          "summary": "AppError subclass, 400 invalid_url: the URL is missing, not absolute, not http/https, or points at this service.",
+          "raises": []
+        },
+        {
+          "name": "InvalidQueryError",
+          "kind": "exception",
+          "summary": "AppError subclass, 400 invalid_query: an analytics window or interval the API refuses to serve.",
+          "raises": []
+        },
+        {
+          "name": "NotFoundError",
+          "kind": "exception",
+          "summary": "AppError subclass, 404 not_found: the short code was never issued.",
+          "raises": []
+        },
+        {
+          "name": "LinkGoneError",
+          "kind": "exception",
+          "summary": "AppError subclass, 410 gone: the code was issued and is now deleted or expired.",
+          "raises": []
+        },
+        {
+          "name": "CodeCollisionError",
+          "kind": "exception",
+          "summary": "AppError subclass, 500 code_collision: minting exhausted its attempts against live codes.",
+          "raises": []
+        },
+        {
+          "name": "RateLimitedError",
+          "kind": "exception",
+          "signature": "(message: str, *, retry_after: float, details: dict[str, Any] | None = None) -> None",
+          "summary": "AppError subclass, 429 rate_limited, carrying the `retry_after` seconds the Retry-After header reports.",
+          "raises": []
+        },
+        {
+          "name": "StorageError",
+          "kind": "exception",
+          "summary": "AppError subclass, 503 storage_unavailable: the datastore is unreachable or rejected the operation.",
+          "raises": []
+        },
+        {
+          "name": "AnalyticsUnavailableError",
+          "kind": "exception",
+          "summary": "AppError subclass, 503 analytics_unavailable; on the redirect path it is logged and swallowed, never returned.",
+          "raises": []
+        }
+      ]
+    },
+    {
+      "module": "config",
+      "depends_on": [],
+      "exports": [
+        {
+          "name": "Settings",
+          "kind": "class",
+          "summary": "BaseSettings with database_url, base_url, rate_limit_requests, rate_limit_window_seconds, analytics_queue_maxsize, analytics_flush_interval_seconds, analytics_batch_size and blocked_hosts, read with the SHORTENER_ prefix.",
+          "raises": []
+        },
+        {
+          "name": "get_settings",
+          "kind": "function",
+          "signature": "() -> Settings",
+          "summary": "Return the process-wide settings, constructed once and reused.",
+          "raises": []
+        }
+      ]
+    },
+    {
+      "module": "codes",
+      "depends_on": [],
+      "exports": [
+        {
+          "name": "ALPHABET",
+          "kind": "type",
+          "summary": "Module-level constant: the 62-character base62 alphabet codes are drawn from.",
+          "raises": []
+        },
+        {
+          "name": "CODE_LENGTH",
+          "kind": "type",
+          "summary": "Module-level constant: 7, the documented code length.",
+          "raises": []
+        },
+        {
+          "name": "generate_code",
+          "kind": "function",
+          "signature": "(length: int = CODE_LENGTH) -> str",
+          "summary": "Mint one candidate code of `length` characters drawn from ALPHABET, uniformly at random.",
+          "raises": []
+        },
+        {
+          "name": "is_valid_code",
+          "kind": "function",
+          "signature": "(code: str) -> bool",
+          "summary": "Whether a string matches the documented character set and length.",
+          "raises": []
+        }
+      ]
+    },
+    {
+      "module": "storage",
+      "depends_on": ["config", "errors"],
+      "exports": [
+        {
+          "name": "metadata",
+          "kind": "type",
+          "summary": "Module-level constant: the SQLAlchemy MetaData holding both tables.",
+          "raises": []
+        },
+        {
+          "name": "links_table",
+          "kind": "type",
+          "summary": "Module-level constant: the `links` table — code (primary key), long_url, created_at, expires_at, deleted_at.",
+          "raises": []
+        },
+        {
+          "name": "clicks_table",
+          "kind": "type",
+          "summary": "Module-level constant: the `clicks` table — id, code, occurred_at, referrer, user_agent, device_class, browser_class, indexed on code and occurred_at.",
+          "raises": []
+        },
+        {
+          "name": "LinkRow",
+          "kind": "class",
+          "summary": "Frozen dataclass for one row of `links`, detached from the connection that read it.",
+          "raises": []
+        },
+        {
+          "name": "ClickRow",
+          "kind": "class",
+          "summary": "Frozen dataclass for one recorded redirect, as analytics hands it over for storage.",
+          "raises": []
+        },
+        {
+          "name": "init_storage",
+          "kind": "function",
+          "signature": "() -> None",
+          "summary": "Open the engine and create the schema if absent; idempotent, called from the app lifespan.",
+          "raises": ["StorageError"]
+        },
+        {
+          "name": "connection",
+          "kind": "function",
+          "signature": "() -> Iterator[Connection]",
+          "summary": "Context manager yielding a connection in a transaction, committing on exit and rolling back on error.",
+          "raises": ["StorageError"]
+        },
+        {
+          "name": "ping",
+          "kind": "function",
+          "signature": "() -> bool",
+          "summary": "Whether the datastore is reachable right now — the evidence behind GET /health.",
+          "raises": []
+        },
+        {
+          "name": "insert_link",
+          "kind": "function",
+          "signature": "(row: LinkRow) -> None",
+          "summary": "Persist a new link, letting the primary key reject a code already in use.",
+          "raises": ["CodeCollisionError", "StorageError"]
+        },
+        {
+          "name": "fetch_link",
+          "kind": "function",
+          "signature": "(code: str) -> LinkRow | None",
+          "summary": "Return the row for a code — deleted and expired ones included — or None if it was never issued.",
+          "raises": ["StorageError"]
+        },
+        {
+          "name": "mark_link_deleted",
+          "kind": "function",
+          "signature": "(code: str, deleted_at: datetime) -> bool",
+          "summary": "Retire a live code, returning whether this call was the one that retired it.",
+          "raises": ["StorageError"]
+        },
+        {
+          "name": "insert_clicks",
+          "kind": "function",
+          "signature": "(rows: Sequence[ClickRow]) -> int",
+          "summary": "Append a batch of recorded clicks, returning how many rows were written.",
+          "raises": ["StorageError"]
+        }
+      ]
+    },
+    {
+      "module": "links",
+      "depends_on": ["config", "codes", "storage", "errors"],
+      "exports": [
+        {
+          "name": "Link",
+          "kind": "class",
+          "summary": "Frozen dataclass: code, long_url, short_url, created_at, expires_at, deleted_at — the link as the rest of the service sees it.",
+          "raises": []
+        },
+        {
+          "name": "create_link",
+          "kind": "function",
+          "signature": "(long_url: str, expires_at: datetime | None = None) -> Link",
+          "summary": "Validate the URL, mint a code with collision retry, persist it, and return the new link.",
+          "raises": ["InvalidURLError", "CodeCollisionError", "StorageError"]
+        },
+        {
+          "name": "resolve_link",
+          "kind": "function",
+          "signature": "(code: str) -> Link",
+          "summary": "Return the live link for a redirect, distinguishing never-issued from deleted-or-expired.",
+          "raises": ["NotFoundError", "LinkGoneError", "StorageError"]
+        },
+        {
+          "name": "get_link",
+          "kind": "function",
+          "signature": "(code: str) -> Link",
+          "summary": "Return a link's metadata including retired ones, with state carried on deleted_at and expires_at.",
+          "raises": ["NotFoundError", "StorageError"]
+        },
+        {
+          "name": "delete_link",
+          "kind": "function",
+          "signature": "(code: str) -> None",
+          "summary": "Retire a code permanently; idempotent, so a retried DELETE still answers 204.",
+          "raises": ["NotFoundError", "StorageError"]
+        }
+      ]
+    },
+    {
+      "module": "analytics",
+      "depends_on": ["config", "storage", "errors"],
+      "exports": [
+        {
+          "name": "FRESHNESS_SECONDS",
+          "kind": "type",
+          "summary": "Module-level constant: 60.0 — the bound within which a recorded click must be visible (A6).",
+          "raises": []
+        },
+        {
+          "name": "BREAKDOWN_LIMIT",
+          "kind": "type",
+          "summary": "Module-level constant: 100 — the top-N size of every breakdown.",
+          "raises": []
+        },
+        {
+          "name": "OTHER_BUCKET",
+          "kind": "type",
+          "summary": "Module-level constant: the label of the row everything below the top-N is summed into.",
+          "raises": []
+        },
+        {
+          "name": "MAX_INTERVALS",
+          "kind": "type",
+          "summary": "Module-level constant: 366 — the largest number of buckets one time-series query may return.",
+          "raises": []
+        },
+        {
+          "name": "VALID_INTERVALS",
+          "kind": "type",
+          "summary": "Module-level constant: the bucket widths a caller may ask for ('hour', 'day').",
+          "raises": []
+        },
+        {
+          "name": "BreakdownEntry",
+          "kind": "class",
+          "summary": "Frozen dataclass: one grouped count, as {value, count}.",
+          "raises": []
+        },
+        {
+          "name": "IntervalCount",
+          "kind": "class",
+          "summary": "Frozen dataclass: clicks in one time bucket, labelled by the bucket's start.",
+          "raises": []
+        },
+        {
+          "name": "ClickSummary",
+          "kind": "class",
+          "summary": "Frozen dataclass: code, total_clicks, start, end, interval, series, and the referrer, device and browser breakdowns.",
+          "raises": []
+        },
+        {
+          "name": "start_recorder",
+          "kind": "function",
+          "signature": "() -> None",
+          "summary": "Start the background drain that batches queued clicks into the datastore.",
+          "raises": []
+        },
+        {
+          "name": "stop_recorder",
+          "kind": "function",
+          "signature": "() -> None",
+          "summary": "Drain what is queued and stop the background worker.",
+          "raises": []
+        },
+        {
+          "name": "record_click",
+          "kind": "function",
+          "signature": "(code: str, occurred_at: datetime, referrer: str | None = None, user_agent: str | None = None) -> None",
+          "summary": "Queue one successful redirect for recording, classifying the user-agent at write time and never touching the datastore inline.",
+          "raises": ["AnalyticsUnavailableError"]
+        },
+        {
+          "name": "total_clicks",
+          "kind": "function",
+          "signature": "(code: str) -> int",
+          "summary": "Total recorded clicks for a code — the count the metadata endpoint reports.",
+          "raises": ["StorageError"]
+        },
+        {
+          "name": "summarize_clicks",
+          "kind": "function",
+          "signature": "(code: str, start: datetime, end: datetime, interval: str = \"day\") -> ClickSummary",
+          "summary": "Total, per-interval counts and breakdowns over the half-open window [start, end), bounded by MAX_INTERVALS and BREAKDOWN_LIMIT.",
+          "raises": ["InvalidQueryError", "StorageError"]
+        }
+      ]
+    },
+    {
+      "module": "ratelimit",
+      "depends_on": ["config", "errors"],
+      "exports": [
+        {
+          "name": "RateLimitDecision",
+          "kind": "class",
+          "summary": "Frozen dataclass: allowed, remaining, retry_after — the verdict for one request.",
+          "raises": []
+        },
+        {
+          "name": "enforce_rate_limit",
+          "kind": "function",
+          "signature": "(client_key: str) -> RateLimitDecision",
+          "summary": "Charge one request against a caller's bucket, returning the decision when allowed and raising when it is not.",
+          "raises": ["RateLimitedError"]
+        }
+      ]
+    },
+    {
+      "module": "main",
+      "depends_on": ["config", "errors", "storage", "links", "analytics", "ratelimit"],
+      "exports": [
+        {
+          "name": "REDIRECT_STATUS",
+          "kind": "type",
+          "summary": "Module-level constant: 301, the permanent-redirect status A1 settled on, named once so the decision is one edit.",
+          "raises": []
+        },
+        {
+          "name": "CreateLinkRequest",
+          "kind": "class",
+          "summary": "Pydantic model for the creation payload: url, and optional expires_at.",
+          "raises": []
+        },
+        {
+          "name": "LinkResponse",
+          "kind": "class",
+          "summary": "Pydantic model for the 201 body: code, short_url, long_url, created_at, expires_at.",
+          "raises": []
+        },
+        {
+          "name": "LinkDetailResponse",
+          "kind": "class",
+          "summary": "Pydantic model extending LinkResponse with total_clicks and deleted_at, for the metadata endpoint.",
+          "raises": []
+        },
+        {
+          "name": "BreakdownItem",
+          "kind": "class",
+          "summary": "Pydantic model for one grouped count in an analytics breakdown: value, count.",
+          "raises": []
+        },
+        {
+          "name": "IntervalPoint",
+          "kind": "class",
+          "summary": "Pydantic model for one time bucket of the analytics series: start, count.",
+          "raises": []
+        },
+        {
+          "name": "AnalyticsResponse",
+          "kind": "class",
+          "summary": "Pydantic model for the analytics body: code, total_clicks, start, end, interval, series, referrers, devices, browsers.",
+          "raises": []
+        },
+        {
+          "name": "HealthResponse",
+          "kind": "class",
+          "summary": "Pydantic model for the health body: status, and the datastore reachability it rests on.",
+          "raises": []
+        },
+        {
+          "name": "create_app",
+          "kind": "function",
+          "signature": "() -> FastAPI",
+          "summary": "Build the application: routes, the AppError handler, and the lifespan that opens storage and runs the analytics drain.",
+          "raises": []
+        },
+        {
+          "name": "app",
+          "kind": "type",
+          "summary": "The ASGI application, assigned by the implementer as `app = create_app()`; declared without a value in the stub so importing the package cannot call an unimplemented function.",
+          "raises": []
+        }
+      ]
+    }
+  ]
+}

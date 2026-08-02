@@ -58,6 +58,27 @@ class Task:
         """
         return self.node.params
 
+    @staticmethod
+    def needs_params(*names: str):
+        """Declare the params a task cannot run without, for preflight to check.
+
+        Discovered the expensive way: `design` declared `max_turns` and
+        `timeout_s`, its verify probes inherited exactly those, and both `py:`
+        checks needed `root`. Every check ERRORed *after* a twelve-minute code
+        agent session had already finished — and an ERROR cannot insert a fix
+        node, so the run escalated to a human over a two-word plan omission.
+
+        A run should refuse to start when its plan names checks the engine
+        cannot perform (§preflight). This is what makes that checkable for
+        params as well as for predicates.
+        """
+
+        def declare(fn):
+            fn.required_params = names
+            return fn
+
+        return declare
+
     def param(self, name: str, default: Any = None) -> Any:
         value = self.node.params.get(name, default)
         if value is None:

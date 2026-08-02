@@ -176,10 +176,15 @@ def preflight(
         console.print(f"[yellow]stages with no node:[/yellow] {loaded.missing_stages}")
     console.print(f"predicates required: {len(loaded.required_predicates)}")
 
-    if missing:
-        console.print(f"[red]not registered:[/red] {', '.join(missing)}")
+    unsatisfied = loaded.unsatisfied_params()
+    if missing or unsatisfied:
+        if missing:
+            console.print(f"[red]not registered:[/red] {', '.join(missing)}")
+        for problem in unsatisfied:
+            console.print(f"[red]missing param:[/red] {problem}")
         raise typer.Exit(1)
     console.print("[green]every predicate is registered[/green]")
+    console.print("[green]every check has the params it needs[/green]")
 
 
 @app.command()

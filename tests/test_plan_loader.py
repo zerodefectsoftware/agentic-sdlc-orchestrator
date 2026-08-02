@@ -181,6 +181,33 @@ def test_scaffold_audits_the_tree_against_the_contract(plan):
     assert "contract.broken == 0" in checks
 
 
+def test_a_check_whose_params_the_node_omits_is_caught_before_the_run(plan, tmp_path):
+    """The expensive discovery: `design` declared `max_turns` and `timeout_s`,
+    its verify probes inherited exactly those, and both py: checks needed `root`.
+
+    Every check ERRORed *after* a twelve-minute code agent session had finished,
+    and an ERROR cannot insert a fix node — so the run escalated to a human over
+    a two-word plan omission. Preflight exists to refuse a plan naming checks the
+    engine cannot perform; this makes that true for params as well as predicates.
+    """
+    assert plan.unsatisfied_params() == []
+
+    stripped = GREENFIELD.read_text().replace('root: "{target.root}"', "seed: 1", 1)
+    path = tmp_path / "greenfield.yaml"
+    path.write_text(stripped)
+
+    problems = load_plan(path, profile=PROFILE).unsatisfied_params()
+    assert len(problems) == 2
+    assert all("needs root" in problem for problem in problems)
+    assert all(problem.startswith("design:") for problem in problems)
+
+
+def test_every_shipped_plan_declares_the_params_its_checks_need():
+    for name in ("greenfield", "brownfield", "ambiguous"):
+        plan = load_plan(REPO / "plans" / f"{name}.yaml", profile=PROFILE)
+        assert plan.unsatisfied_params() == [], name
+
+
 def test_design_approval_is_bound_to_artifact_versions(plan):
     """D10: approval of a superseded artifact is not approval."""
     node = plan.node("design-approval")

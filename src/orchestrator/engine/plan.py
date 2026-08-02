@@ -370,6 +370,33 @@ class Plan(BaseModel):
     def nodes_in(self, stage: Stage) -> list[Node]:
         return [node for node in self.nodes if node.stage is stage]
 
+    def unsatisfied_params(self) -> list[str]:
+        """Every `py:` target a node names whose required params it does not declare.
+
+        A `verify:` probe inherits the node's params, so a node can declare the
+        ones its *worker* needs and none of the ones its *checks* need — which
+        reports as three ERRORed gate checks after the work has already been
+        done and paid for. Checkable before the run starts, so it is.
+        """
+        from orchestrator.workers.pytask import resolve
+
+        problems: list[str] = []
+        for node in self.nodes:
+            for target in [node.run, *node.verify]:
+                if not target or not target.startswith("py:"):
+                    continue
+                try:
+                    required = getattr(resolve(target.split(":", 1)[1]), "required_params", ())
+                except Exception:  # noqa: BLE001 — unresolvable is reported elsewhere
+                    continue
+                missing = [name for name in required if name not in node.params]
+                if missing:
+                    problems.append(
+                        f"{node.id}: {target} needs {', '.join(missing)} — "
+                        f"declared {sorted(node.params) or '(none)'}"
+                    )
+        return problems
+
     @property
     def required_predicates(self) -> list[str]:
         """Every predicate this plan names, from gates, escalations, and templates.

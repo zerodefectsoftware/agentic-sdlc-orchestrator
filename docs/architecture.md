@@ -1166,6 +1166,8 @@ nodes:
     write_scope: ["{target.root}/**", "target/design.json"]
     freeze_paths: ["{target.tests_root}/**"]
     params:
+      root: "{target.root}"           # the verify probes inherit these, and both
+                                      # py: checks below need it
       max_turns: 80                   # eight packages of declarations
       timeout_s: 2400
     verify:

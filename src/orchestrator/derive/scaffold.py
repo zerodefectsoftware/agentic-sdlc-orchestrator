@@ -30,6 +30,7 @@ class ContractError(ValueError):
     """The target does not match the contract, and says exactly where."""
 
 
+@Task.needs_params("root")
 def verify_target_matches_contract(task: Task) -> TaskOutput:
     design = Design.model_validate_json(task.require("design.spec"))
     root = _package_root(task)

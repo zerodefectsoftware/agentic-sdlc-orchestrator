@@ -40,6 +40,7 @@ print(json.dumps(failed))
 """
 
 
+@Task.needs_params("root")
 def imports_resolve(task: Task) -> TaskOutput:
     """Import every module under the target root, in a subprocess.
 
@@ -87,6 +88,7 @@ def imports_resolve(task: Task) -> TaskOutput:
     )
 
 
+@Task.needs_params("root")
 def stubs_are_unimplemented(task: Task) -> TaskOutput:
     """Every function and method under the target root must still be a stub (D24).
 
