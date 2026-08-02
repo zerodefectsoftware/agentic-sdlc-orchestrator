@@ -18,6 +18,7 @@ import yaml
 
 from orchestrator.engine.compose import CompositionError, compose
 from orchestrator.engine.loader import PlanError, dependency_graph, load_plan
+from orchestrator.engine.plan import NodeKind
 from orchestrator.engine.profile import ProfileError, TargetProfile
 from orchestrator.gates.predicates import register_all
 from orchestrator.gates.registry import PredicateRegistry
@@ -409,3 +410,37 @@ def test_ambiguous_normalizes_the_answer_before_designing():
 def test_ambiguous_lowers_the_escalation_threshold_in_data():
     plan = load_plan(PLANS / "ambiguous.yaml", profile=PROFILE)
     assert plan.node("ambiguity-triage").params == {"threshold": "medium"}
+
+
+def test_no_scenario_lets_an_implementer_edit_the_suite_judging_it():
+    """D6, across every plan — the invariant that shallow override silently broke.
+
+    `template` is a nested object, so overriding it replaces greenfield's whole
+    template. Brownfield restated four keys and not `freeze_paths`, which handed
+    its implementers write access to the acceptance suite. No gate would have
+    caught it: a weakened test makes the suite greener, not redder.
+    """
+    for name in ("greenfield", "brownfield", "ambiguous"):
+        plan = load_plan(PLANS / f"{name}.yaml", profile=PROFILE)
+        for node in plan.nodes:
+            for scope in (node, node.template) if node.template else (node,):
+                if getattr(scope, "role", None) not in ("implementer", "fixer"):
+                    continue
+                assert PROFILE.tests_root + "/**" in scope.freeze_paths, (
+                    f"{name}: {node.id} may write {PROFILE.tests_root} — "
+                    f"the suite that judges it"
+                )
+
+
+def test_no_scenario_inherits_a_write_scope_its_kind_cannot_use():
+    """An `agent` never touches a filesystem, so a write scope on one is a lie.
+
+    Brownfield's design override inherited greenfield's — a blast radius
+    advertised in the evidence bundle that the node could not possibly use.
+    """
+    for name in ("greenfield", "brownfield", "ambiguous"):
+        plan = load_plan(PLANS / f"{name}.yaml", profile=PROFILE)
+        for node in plan.nodes:
+            if node.kind is NodeKind.AGENT:
+                assert not node.write_scope, f"{name}: agent {node.id} declares a write scope"
+                assert not node.output_files, f"{name}: agent {node.id} declares output files"

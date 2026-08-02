@@ -378,23 +378,19 @@ class Plan(BaseModel):
         reports as three ERRORed gate checks after the work has already been
         done and paid for. Checkable before the run starts, so it is.
         """
-        from orchestrator.workers.pytask import resolve
-
         problems: list[str] = []
         for node in self.nodes:
-            for target in [node.run, *node.verify]:
-                if not target or not target.startswith("py:"):
-                    continue
-                try:
-                    required = getattr(resolve(target.split(":", 1)[1]), "required_params", ())
-                except Exception:  # noqa: BLE001 — unresolvable is reported elsewhere
-                    continue
-                missing = [name for name in required if name not in node.params]
-                if missing:
-                    problems.append(
-                        f"{node.id}: {target} needs {', '.join(missing)} — "
-                        f"declared {sorted(node.params) or '(none)'}"
-                    )
+            # A fan-out child inherits its checks and params from the template,
+            # never from the node — so checking only the node passes a plan whose
+            # every child will ERROR after its work is done and paid for.
+            checked = [(node.id, node.run, node.verify, node.params)]
+            if node.template:
+                checked.append(
+                    (f"{node.id}.template", None, node.template.verify, node.template.params)
+                )
+
+            for label, run, verify, params in checked:
+                problems.extend(_missing_params(label, [run, *verify], params))
         return problems
 
     @property
@@ -422,3 +418,24 @@ class Plan(BaseModel):
                         collect(check)
 
         return sorted(names)
+
+
+def _missing_params(label: str, targets: list[str | None], params: dict) -> list[str]:
+    """Which `py:` targets among `targets` need params `params` does not have."""
+    from orchestrator.workers.pytask import resolve
+
+    problems: list[str] = []
+    for target in targets:
+        if not target or not target.startswith("py:"):
+            continue
+        try:
+            required = getattr(resolve(target.split(":", 1)[1]), "required_params", ())
+        except Exception:  # noqa: BLE001 — unresolvable is reported elsewhere
+            continue
+        missing = [name for name in required if name not in params]
+        if missing:
+            problems.append(
+                f"{label}: {target} needs {', '.join(missing)} — "
+                f"declared {sorted(params) or '(none)'}"
+            )
+    return problems

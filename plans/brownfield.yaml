@@ -85,7 +85,19 @@ insert_after:
 
 override:
 
-  # The architect designs a change to something, not a system from nothing.
+  # The architect designs a change to something, not a system from nothing —
+  # so it stays an `agent` and writes no code. Greenfield's architect writes
+  # stub packages because a new build has no interfaces to call (D24); here the
+  # interfaces already exist in the codebase being changed, which is the whole
+  # reason this scenario could always fan out safely.
+  #
+  # The three empty lines below are load-bearing. `override` is shallow, so a
+  # key this node does not name is *inherited*, and greenfield's design node
+  # carries a write scope, an output file and three verify probes that only
+  # make sense for something producing stubs. Left inherited, an agent node
+  # would advertise a blast radius it cannot use, and `stubs_are_unimplemented`
+  # would run over live code and report every implemented function in the
+  # target as an offender.
   design:
     id: design
     kind: agent
@@ -95,6 +107,9 @@ override:
     inputs: [impact-analysis.artifacts.report]
     output_schema: schemas/design.json
     outputs: [spec, modules]
+    write_scope: []
+    output_files: {}
+    verify: []
     gate:                               # G3
       all:
         - predicate: contract_is_valid
@@ -143,11 +158,20 @@ override:
     stage: implementation
     needs: [tests-acceptance]
     from: impact-analysis.artifacts.affected_modules
+    # `template` is a nested object and `override` is shallow, so this replaces
+    # greenfield's template whole. Every key it needs must be restated —
+    # `freeze_paths` above all. Without it a brownfield implementer may edit the
+    # acceptance suite that judges it, and the cheapest route to a green suite
+    # is a weakened test (D6). It was missing, and no gate would have noticed.
     template:
       kind: codeagent
       role: implementer
       inputs: [design.artifacts.spec, impact-analysis.artifacts.report]
       write_scope: ["{target.root}/{item.path}/**"]
+      freeze_paths: ["{target.tests_root}/**"]   # D6 — not the suite judging it
+      params:
+        max_turns: 60
+        timeout_s: 1800
       verify:
         - "sh:{target.commands.lint_path} {target.root}/{item.path}"
       gate:                             # G6, per module

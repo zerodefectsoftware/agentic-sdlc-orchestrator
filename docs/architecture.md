@@ -1273,6 +1273,7 @@ nodes:
       write_scope: ["{target.root}/{item.path}/**"]   # D7 blast radius
       freeze_paths: ["{target.tests_root}/**"]        # D6: not the suite judging it
       params:
+        root: "{target.root}"   # the verify probes inherit these
         max_turns: 60         # one module, against a settled contract
         timeout_s: 1800
       verify:

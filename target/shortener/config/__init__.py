@@ -11,6 +11,8 @@ is the only way in, so a caller that never asks never pays.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,6 +44,7 @@ class Settings(BaseSettings):
     blocked_hosts: tuple[str, ...] = ()
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return the process-wide settings, constructed once and reused."""
-    raise NotImplementedError
+    return Settings()

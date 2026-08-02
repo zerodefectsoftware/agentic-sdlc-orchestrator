@@ -391,10 +391,18 @@ class Scheduler:
 
         for child in expected:
             self._runtime[child.id] = child
-            if store.get_node(session, run, child.id) is None:
+            row = store.get_node(session, run, child.id)
+            if row is None:
                 store.insert_node(
                     session, run, child.id, str(child.kind), str(child.stage), _config(child)
                 )
+            elif row.status is not NodeStatus.PENDING:
+                # A child whose name survived a re-decomposition still carries the
+                # status of the run that abandoned it. Creating only the *missing*
+                # rows left six of eight modules SKIPPED from a previous shape, so
+                # two implementers ran and six never did — while the fan-out
+                # counted all eight as its children.
+                row.status = NodeStatus.PENDING
         # Assigned, not appended: re-materialising after a changed decomposition
         # must drop the children that no longer exist, or the fanout waits on
         # work nobody will do.

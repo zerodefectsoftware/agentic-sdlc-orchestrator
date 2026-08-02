@@ -701,6 +701,32 @@ def test_a_resumed_fanout_re_materialises_when_the_decomposition_changed(
     assert statuses(session, run)["impl"] is NodeStatus.PASSED
 
 
+def test_a_re_materialised_child_whose_name_survived_is_run_again(
+    session, tmp_path, fanout_worker
+):
+    """A surviving name still carries the status of the run that abandoned it.
+
+    Creating only the *missing* rows left six of eight modules SKIPPED from a
+    previous decomposition: two implementers ran, six never did, and the fanout
+    counted all eight as its children.
+    """
+    plan = plan_from(tmp_path, FANOUT)
+    scheduler = fanout_scheduler(plan, fanout_worker, tmp_path)
+    run = scheduler.start(session, requirement_path="r.md", target_profile="t.yaml")
+
+    # `impl:api` is in the new decomposition too, but was skipped by the old one.
+    store.insert_node(session, run, "impl:api", "codeagent", "implementation", {})
+    store.get_node(session, run, "impl:api").status = NodeStatus.SKIPPED
+    store.get_node(session, run, "impl").extra_needs = ["impl:api"]   # storage is new
+    session.flush()
+    scheduler.rehydrate(session, run)
+
+    scheduler.advance(session, run)
+
+    assert "impl:api" in fanout_worker.calls        # not left skipped
+    assert statuses(session, run)["impl:api"] is NodeStatus.PASSED
+
+
 def test_a_fanout_whose_children_did_not_pass_does_not_pass(session, tmp_path):
     """A fanout whose children were skipped has not done its work.
 
