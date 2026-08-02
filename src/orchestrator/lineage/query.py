@@ -68,15 +68,26 @@ def stale_approvals(session: Session, run: Run) -> list[StaleApproval]:
     This is what turns "the human approved it" into "the human approved *this*".
     An approval captured as a boolean cannot answer the question at all — which
     is why most human-in-the-loop systems don't.
+
+    **Only the standing decision per checkpoint counts.** Every approval ever
+    recorded is kept, and scanning all of them made an approval of v2 stale
+    forever — including after the same person had approved v4. The gate could
+    then never pass, and a reconciler that re-opens stale approvals turned that
+    into a loop nobody could approve their way out of. The history is evidence,
+    not a set of live signatures.
     """
     stale: list[StaleApproval] = []
-    approvals = session.scalars(
-        select(Approval).where(
-            Approval.run_id == run.id, Approval.decision == Decision.APPROVED
-        )
-    )
+    standing: dict[str, Approval] = {}
+    for approval in session.scalars(
+        select(Approval)
+        .where(Approval.run_id == run.id)
+        .order_by(Approval.decided_at, Approval.id)
+    ):
+        standing[approval.node_id] = approval
 
-    for approval in approvals:
+    for approval in standing.values():
+        if approval.decision is not Decision.APPROVED:
+            continue
         for binding in approval.bindings:
             approved = binding.artifact
             current = session.scalar(

@@ -327,3 +327,31 @@ def test_state_survives_the_process(tmp_path):
         assert reloaded.status is RunStatus.STOPPED
         assert reloaded.stop_reason == "safe stop"
         assert len(reloaded.nodes) == len(PLAN_NODES)
+
+
+def test_a_replaced_approval_is_history_not_a_live_signature(session, run):
+    """Every approval ever recorded is kept, and scanning all of them made an
+    approval of v2 stale forever — including after the same person approved v4.
+
+    The gate could then never pass, and a reconciler that re-opens stale
+    approvals turned that into a loop nobody could approve their way out of.
+    """
+    old = recorder.record_artifact(session, run, name="design.spec", content="v1")
+    recorder.decide(
+        session,
+        recorder.request_approval(session, run, node_id="design-approval", artifacts=[old]),
+        decision=Decision.APPROVED,
+        decided_by="alice",
+    )
+
+    new = recorder.record_artifact(session, run, name="design.spec", content="v2")
+    assert query.stale_approvals(session, run)      # the old signature is stale
+
+    recorder.decide(
+        session,
+        recorder.request_approval(session, run, node_id="design-approval", artifacts=[new]),
+        decision=Decision.APPROVED,
+        decided_by="alice",
+    )
+
+    assert not query.stale_approvals(session, run)  # ...until it is superseded
