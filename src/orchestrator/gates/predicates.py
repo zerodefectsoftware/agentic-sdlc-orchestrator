@@ -24,6 +24,7 @@ import json
 import re
 from pathlib import Path
 
+import networkx as nx
 from pydantic import ValidationError
 
 from orchestrator.artifacts import (
@@ -37,6 +38,7 @@ from orchestrator.artifacts import (
     SecurityReport,
     Severity,
 )
+from orchestrator.engine.loader import runtime_graph
 from orchestrator.gates.registry import PredicateContext, PredicateRegistry
 from orchestrator.gates.registry import registry as default_registry
 from orchestrator.lineage import query, recorder
@@ -501,12 +503,35 @@ def register_all(registry: PredicateRegistry | None = None) -> PredicateRegistry
         "no_node_in_nonterminal_state", "no work is still pending, running, or blocked"
     )
     def no_node_in_nonterminal_state(context: PredicateContext) -> tuple[bool, str]:
+        """Nothing this gate depends on is still in flight.
+
+        Deliberately not "no node anywhere is unfinished", which cannot hold when
+        the node asking is itself running and the checkpoint that follows it is
+        pending by definition. Written that way the check was unsatisfiable, and
+        being the last gate in the plan, nothing ever reached it to find out.
+
+        So the question is about *upstream*: everything this node waits on, and
+        everything they waited on, must have finished. What comes after has not
+        started, which is not the same as unfinished.
+        """
         session, run = context.require("session", "run")
         unfinished = store.nodes_in_nonterminal_state(session, run)
+
+        node, plan = context.node, context.plan
+        if node is not None and plan is not None:
+            inserted = {
+                row.node_id: list(row.extra_needs or ())
+                for row in store.all_nodes(session, run)
+                if row.extra_needs
+            }
+            graph = runtime_graph(plan, inserted)
+            upstream = nx.ancestors(graph, node.id) if node.id in graph else set()
+            unfinished = [row for row in unfinished if row.node_id in upstream]
+
         if unfinished:
             ids = [f"{n.node_id} ({n.status})" for n in unfinished]
             return False, f"{len(ids)} nodes unfinished: {_listed(ids)}"
-        return True, "every node reached a terminal state"
+        return True, "everything this gate depends on reached a terminal state"
 
     @reg.register("lineage_complete", "every artifact is attributable to a producing attempt")
     def lineage_complete(context: PredicateContext) -> tuple[bool, str]:

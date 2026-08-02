@@ -44,6 +44,7 @@ class PredicateContext:
     run: Run | None = None
     artifacts: ArtifactStore | None = None
     node: Node | None = None
+    plan: Any | None = None       # the graph, for predicates that ask about shape
 
     def require(self, *names: str) -> Any:
         """Fetch context a predicate depends on, or explain what is missing.

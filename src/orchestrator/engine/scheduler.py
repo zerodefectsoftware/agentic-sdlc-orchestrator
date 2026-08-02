@@ -535,7 +535,13 @@ class Scheduler:
         traceability matrices, lineage completeness — raises and the gate ERRORs.
         The unit tests never saw it because they call predicates directly.
         """
-        return PredicateContext(session=session, run=run, artifacts=self.artifacts, node=node)
+        return PredicateContext(
+            session=session,
+            run=run,
+            artifacts=self.artifacts,
+            node=node,
+            plan=self.plan,
+        )
 
     # ----------------------------------------------------------------- #
     # consequences

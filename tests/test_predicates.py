@@ -8,6 +8,7 @@ directions worth checking: nothing dropped, and nothing invented.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +36,8 @@ from orchestrator.lineage import recorder
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
 from orchestrator.state.models import Decision, NodeStatus
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -693,3 +696,62 @@ def test_the_setup_predicate_says_why_the_steps_failed(registry, session, run, a
     )
     assert not passed
     assert "UTC" in detail
+
+
+def test_the_final_gate_does_not_wait_for_itself(session, run, artifacts, registry):
+    """It cannot hold otherwise, and being last, nothing ever reached it to find out.
+
+    The node asking is running while it asks, and the checkpoint after it is
+    pending by definition — so "no node anywhere is unfinished" was
+    unsatisfiable. The question is about upstream.
+    """
+    from orchestrator.engine.loader import load_plan
+    from orchestrator.engine.profile import TargetProfile
+
+    plan = load_plan(
+        REPO / "plans" / "greenfield.yaml",
+        profile=TargetProfile.load(REPO / "config" / "target.shortener.yaml"),
+    )
+    for node in plan.nodes:
+        if store.get_node(session, run, node.id) is None:
+            store.insert_node(session, run, node.id, str(node.kind), str(node.stage), {})
+        store.get_node(session, run, node.id).status = NodeStatus.PASSED
+
+    gate = plan.node("release-readiness")
+    store.get_node(session, run, gate.id).status = NodeStatus.RUNNING
+    store.get_node(session, run, "accept").status = NodeStatus.PENDING
+    session.flush()
+
+    passed, detail = check(
+        registry,
+        "no_node_in_nonterminal_state",
+        context(session, run, artifacts, node=gate, plan=plan),
+    )
+    assert passed, detail
+
+
+def test_the_final_gate_still_refuses_unfinished_work_upstream(session, run, artifacts, registry):
+    from orchestrator.engine.loader import load_plan
+    from orchestrator.engine.profile import TargetProfile
+
+    plan = load_plan(
+        REPO / "plans" / "greenfield.yaml",
+        profile=TargetProfile.load(REPO / "config" / "target.shortener.yaml"),
+    )
+    for node in plan.nodes:
+        if store.get_node(session, run, node.id) is None:
+            store.insert_node(session, run, node.id, str(node.kind), str(node.stage), {})
+        store.get_node(session, run, node.id).status = NodeStatus.PASSED
+
+    gate = plan.node("release-readiness")
+    store.get_node(session, run, gate.id).status = NodeStatus.RUNNING
+    store.get_node(session, run, "docs").status = NodeStatus.STALE
+    session.flush()
+
+    passed, detail = check(
+        registry,
+        "no_node_in_nonterminal_state",
+        context(session, run, artifacts, node=gate, plan=plan),
+    )
+    assert not passed
+    assert "docs" in detail
