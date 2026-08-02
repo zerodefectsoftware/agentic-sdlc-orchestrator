@@ -384,6 +384,14 @@ class Scheduler:
                 )
                 outstanding.append(child.id)
             elif row.status is not NodeStatus.PASSED:
+                # Refresh the stored definition, not just the status. A child is
+                # dispatched from its persisted config when a previous process
+                # created it, so a child re-entered directly — by an escalation
+                # approval, say — runs the template as it was *then*. Two
+                # implementers failed twice on a param the template had already
+                # been given, because nothing rewrote what they were dispatched
+                # from.
+                row.config = _config(child)
                 row.status = NodeStatus.PENDING
                 outstanding.append(child.id)
 

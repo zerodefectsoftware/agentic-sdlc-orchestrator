@@ -330,8 +330,9 @@ def create_app() -> FastAPI:
     return app
 
 
-# Assigned by the implementer as `app = create_app()`. Declared without a value
-# in the stub on purpose: a stub that constructed the app at import time would
-# call a function that raises, and every module in the package would stop
-# importing.
+# The ASGI application, and the entry point everything else names:
+# `shortener.main:app` for uvicorn, and the same attribute the acceptance suite
+# imports. Constructing it here is safe because `create_app()` only wires routes
+# and handlers — the datastore and the analytics drain are opened by the
+# lifespan, not at import.
 app: FastAPI = create_app()
