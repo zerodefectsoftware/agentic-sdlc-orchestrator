@@ -1171,7 +1171,12 @@ nodes:
       max_turns: 80                   # eight packages of declarations
       timeout_s: 2400
     verify:
-      - "sh:{target.commands.lint}"
+      # Scoped to what this node owns. `lint` covers all of target/, including
+      # the acceptance suite a different agent wrote and this one is frozen out
+      # of — so an unrelated import order in target/tests failed the architect's
+      # gate on code it could not have written and cannot fix. Same rule the
+      # fan-out children already follow.
+      - "sh:{target.commands.lint_path} {target.root}"
       - py:orchestrator.gates.imports_resolve
       - py:orchestrator.gates.stubs_are_unimplemented
     gate:                             # G3

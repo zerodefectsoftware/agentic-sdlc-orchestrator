@@ -16,12 +16,13 @@ import pytest
 from orchestrator.engine.loader import load_plan
 from orchestrator.engine.plan import Stage
 from orchestrator.engine.scheduler import Scheduler, SchedulerError, parse_fanout_items
+from orchestrator.gates import Verdict, tool_facts
 from orchestrator.gates.registry import PredicateRegistry
 from orchestrator.lineage import query, recorder
 from orchestrator.state import store
 from orchestrator.state.artifacts import ArtifactStore
 from orchestrator.state.models import Decision, NodeStatus, RunStatus
-from orchestrator.workers import StubWorker, WorkerError, WorkScope
+from orchestrator.workers import StubWorker, WorkerError, WorkerResult, WorkScope
 from orchestrator.workers import stub as scripts
 
 LINEAR = """
@@ -350,6 +351,106 @@ def test_escalate_when_activates_the_declared_node(session, tmp_path):
     # intake has no gate, so it passes; the escalation condition then fires.
     scheduler.advance(session, run)
     assert statuses(session, run)["clarify"] is not NodeStatus.SKIPPED
+
+
+# --------------------------------------------------------------------------- #
+# re-checking without re-doing
+# --------------------------------------------------------------------------- #
+
+UNCHECKABLE = """
+plan: t
+version: 1
+nodes:
+  - id: build
+    kind: tool
+    stage: implementation
+    run: sh:make
+    verify:
+      - sh:coverage
+    gate:
+      all:
+        - "make.exit_code == 0"
+        - "coverage.percent >= 80"
+"""
+
+
+def observed(percent: float) -> WorkerResult:
+    """What the check would report once the harness can run it."""
+    return WorkerResult(facts=tool_facts("coverage", **{"coverage.percent": percent}))
+
+
+def errored_build(session, tmp_path, worker):
+    """A run whose gate could not be evaluated: the check produced no fact."""
+    scheduler, run = run_plan(session, plan_from(tmp_path, UNCHECKABLE), worker)
+    assert statuses(session, run)["build"] is NodeStatus.ERRORED
+    return scheduler, run
+
+
+def test_recheck_answers_what_could_not_be_checked_without_redoing_the_work(
+    session, tmp_path
+):
+    """The recovery an ERROR needs.
+
+    `retry` redoes the work, which is right for a FAIL and wrong here: an ERROR
+    says in as many words that the harness needs attention and the work does
+    not. A twelve-minute code agent session should not be repeated because a
+    plan omitted a param.
+    """
+    worker = StubWorker(
+        {"build": scripts.passing("make"), "build#verify0": scripts.unevaluable()}
+    )
+    scheduler, run = errored_build(session, tmp_path, worker)
+
+    scheduler.worker = StubWorker(
+        {"build#verify0": observed(91)}
+    )
+    result = scheduler.revalidate(session, run, "build")
+
+    assert result.verdict is Verdict.PASS
+    assert statuses(session, run)["build"] is NodeStatus.PASSED
+    assert worker.calls == ["build", "build#verify0"]   # the work ran exactly once
+
+
+def test_recheck_carries_forward_the_verdicts_that_were_reached(session, tmp_path):
+    """Only the ERRORED checks are re-evaluated; the others were performed.
+
+    So this cannot manufacture green: a check that answered "no" keeps its
+    answer, and only "could not tell" is asked again.
+    """
+    worker = StubWorker(
+        {"build": scripts.passing("make"), "build#verify0": scripts.unevaluable()}
+    )
+    scheduler, run = errored_build(session, tmp_path, worker)
+
+    scheduler.worker = StubWorker(
+        {"build#verify0": observed(12)}
+    )
+    result = scheduler.revalidate(session, run, "build")
+
+    assert result.verdict is Verdict.FAIL
+    assert [str(check.verdict) for check in result.checks] == ["pass", "fail"]
+
+
+def test_recheck_refuses_a_node_that_failed(session, tmp_path):
+    """It can turn "could not tell" into an answer, never "no" into "yes"."""
+    worker = StubWorker({"build": scripts.failing("make")})
+    scheduler, run = run_plan(session, plan_from(tmp_path, LINEAR), worker)
+    assert statuses(session, run)["build"] is NodeStatus.FAILED
+
+    with pytest.raises(SchedulerError, match="failed work has to be redone"):
+        scheduler.revalidate(session, run, "build")
+
+
+def test_recheck_that_still_cannot_check_stays_an_error(session, tmp_path):
+    """Fixing nothing changes nothing — and must not read as progress."""
+    worker = StubWorker(
+        {"build": scripts.passing("make"), "build#verify0": scripts.unevaluable()}
+    )
+    scheduler, run = errored_build(session, tmp_path, worker)
+
+    result = scheduler.revalidate(session, run, "build")
+    assert result.verdict is Verdict.ERROR
+    assert statuses(session, run)["build"] is NodeStatus.ERRORED
 
 
 # --------------------------------------------------------------------------- #

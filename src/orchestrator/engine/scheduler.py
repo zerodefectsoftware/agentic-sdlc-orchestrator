@@ -36,7 +36,7 @@ from orchestrator.config import get_settings
 from orchestrator.engine.loader import dependency_graph
 from orchestrator.engine.plan import Gate, Node, NodeKind, Plan
 from orchestrator.evidence.render import render_json
-from orchestrator.gates import GateResult, Verdict, evaluate_gate
+from orchestrator.gates import CheckResult, GateResult, Verdict, evaluate_gate
 from orchestrator.gates.facts import FactSet
 from orchestrator.gates.registry import PredicateContext, PredicateRegistry
 from orchestrator.gates.registry import registry as default_registry
@@ -629,6 +629,87 @@ class Scheduler:
         )
 
     # ----------------------------------------------------------------- #
+    # re-checking without re-doing
+    # ----------------------------------------------------------------- #
+
+    def revalidate(self, session: Session, run: Run, node_id: str) -> GateResult:
+        """Re-run the checks that could not be performed, and re-decide the gate.
+
+        The recovery an ERROR actually needs. `retry` re-enters the node and
+        re-does the work, which is right for a FAIL — the work was wrong — and
+        wrong for an ERROR, where the verdict says in as many words that the
+        harness needs attention and the work does not. A twelve-minute code
+        agent session should not be repeated because a plan omitted a param.
+
+        **Only the ERRORED checks are re-evaluated.** The others were performed;
+        their verdicts stand and are carried forward unchanged. That is what
+        keeps this from being a way to manufacture green: a check that FAILED
+        cannot be re-decided here, and a node that FAILED cannot enter at all.
+        """
+        execution = store.get_node(session, run, node_id)
+        node = self._node(node_id)
+        if execution is None or node is None:
+            raise SchedulerError(f"run has no node '{node_id}'")
+        if execution.status is not NodeStatus.ERRORED:
+            raise SchedulerError(
+                f"'{node_id}' is {execution.status}, not errored. Re-checking without "
+                f"re-doing the work is only honest when the check could not be "
+                f"performed; failed work has to be redone"
+            )
+
+        previous = _latest_gate(execution)
+        if previous is None or node.gate is None:
+            raise SchedulerError(f"'{node_id}' has no recorded gate to re-evaluate")
+
+        unperformed = [
+            check
+            for check in node.gate.checks
+            if str(check) in {c["check"] for c in previous.checks if c["verdict"] == "error"}
+        ]
+        if not unperformed:
+            raise SchedulerError(f"'{node_id}' recorded no unperformed checks")
+
+        inputs = self._inputs(session, run, node)
+        facts = self._verify(node, inputs)
+        fresh = evaluate_gate(
+            Gate(all_checks=unperformed),
+            facts,
+            registry=self.registry,
+            context=self._context(session, run, node),
+        )
+
+        merged = _merge(previous.checks, fresh.checks)
+        verdict = (
+            Verdict.ERROR
+            if any(c.verdict is Verdict.ERROR for c in merged)
+            else Verdict.FAIL
+            if any(c.verdict is Verdict.FAIL for c in merged)
+            else Verdict.PASS
+        )
+
+        attempt = store.begin_attempt(session, execution, worker="engine")
+        store.record_gate(
+            session,
+            attempt,
+            verdict=str(verdict),
+            evaluator="orchestrator.gates (re-checked)",
+            checks=[
+                {
+                    "check": check.check,
+                    "verdict": str(check.verdict),
+                    "detail": check.detail,
+                    "observed": check.observed,
+                }
+                for check in merged
+            ],
+        )
+        store.finish_attempt(session, attempt, status=_status_for(verdict))
+        self._apply_policy(session, run, node, execution, verdict, attempt.number, facts)
+        session.flush()
+
+        return GateResult(verdict=verdict, checks=merged, evaluator="re-checked")
+
+    # ----------------------------------------------------------------- #
     # invalidation
     # ----------------------------------------------------------------- #
 
@@ -700,6 +781,38 @@ class Scheduler:
                 stop_reason=f"no node can advance; stuck: {[n.node_id for n in unfinished]}",
             )
         return run
+
+
+def _latest_gate(execution):
+    """The last exit-gate record this node produced, across all its attempts."""
+    records = [
+        record
+        for attempt in execution.attempts
+        for record in attempt.gate_records
+        if record.gate == "exit"
+    ]
+    return records[-1] if records else None
+
+
+def _merge(previous: list[dict], fresh: list[CheckResult]) -> list[CheckResult]:
+    """Fresh verdicts for the checks that were re-run; recorded ones for the rest.
+
+    Order follows the original record, so the re-checked gate reads as the same
+    gate rather than a different one that happens to share checks.
+    """
+    replacement = {check.check: check for check in fresh}
+    return [
+        replacement.get(
+            recorded["check"],
+            CheckResult(
+                check=recorded["check"],
+                verdict=Verdict(recorded["verdict"]),
+                detail=recorded["detail"],
+                observed=recorded.get("observed"),
+            ),
+        )
+        for recorded in previous
+    ]
 
 
 def _status_for(verdict: Verdict) -> NodeStatus:

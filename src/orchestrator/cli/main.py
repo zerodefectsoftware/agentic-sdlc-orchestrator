@@ -33,8 +33,9 @@ from orchestrator.engine.loader import (
     load_plan,
 )
 from orchestrator.engine.profile import ProfileError, TargetProfile
-from orchestrator.engine.scheduler import Scheduler, verify_probes
+from orchestrator.engine.scheduler import Scheduler, SchedulerError, verify_probes
 from orchestrator.evidence import assemble, render
+from orchestrator.gates import Verdict
 from orchestrator.gates.predicates import register_all
 from orchestrator.gates.registry import PredicateRegistry
 from orchestrator.lineage import query, recorder
@@ -669,6 +670,54 @@ def invalidate(
 def resume(run_id: Annotated[str | None, typer.Argument()] = None) -> None:
     """Continue a run that stopped at a checkpoint."""
     _advance(run_id)
+
+
+@app.command()
+def recheck(
+    run_id: Annotated[str, typer.Argument()],
+    node: Annotated[str, typer.Argument(help="The errored node to re-check")],
+) -> None:
+    """Re-run the checks that could not be performed, without re-doing the work.
+
+    The recovery an ERROR needs. `retry` re-enters the node and does the work
+    again, which is right for a FAIL and wrong here: an ERROR says the harness
+    needs attention and the work does not. Repeating a twelve-minute code agent
+    session because a plan omitted a param is exactly the waste the ERROR
+    verdict exists to prevent.
+
+    Only the ERRORED checks are re-evaluated; the rest keep the verdicts they
+    were given. A failed check cannot be re-decided this way, and a failed node
+    cannot enter at all — this direction can only turn "could not tell" into an
+    answer, never "no" into "yes".
+    """
+    with store.Store().session() as session:
+        target = _resolve(session, run_id)
+        loaded = load_plan(
+            get_settings().plans_dir / f"{target.plan_name}.yaml",
+            profile=_profile(Path(target.target_profile)),
+        )
+        scheduler = Scheduler(loaded, _worker(), registry=_registry(), artifacts=ArtifactStore())
+        scheduler.rehydrate(session, target)
+
+        try:
+            result = scheduler.revalidate(session, target, node)
+        except SchedulerError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+
+        colour = "green" if result.passed else "red"
+        console.print(f"[{colour}]{result.verdict}[/{colour}] {node} — re-checked")
+        for check in result.checks:
+            mark = "green" if check.verdict is Verdict.PASS else "red"
+            console.print(f"  [{mark}]{check.verdict}[/{mark}] {check.check}")
+
+        if target.status is not RunStatus.RUNNING and result.passed:
+            target.status = RunStatus.RUNNING
+            target.stop_reason = None
+            session.flush()
+        resolved = target.id
+
+    _show(resolved)
 
 
 def _advance(run_id: str | None) -> None:
