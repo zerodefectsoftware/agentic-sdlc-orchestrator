@@ -63,21 +63,63 @@ def test_plan_node_ids_are_unique_and_dependencies_resolve():
                 assert dep in ids, f"{path.name}: {node['id']} needs unknown '{dep}'"
 
 
-def test_appendix_a_matches_the_real_plan_file():
-    """The doc quotes the plan in full; a quote that drifts is worse than no quote.
+def test_appendix_a_walks_every_node_of_the_real_plan():
+    """Appendix A tabulates the greenfield graph; a table that drifts is worse than none.
 
-    Compared semantically rather than textually, so comment and whitespace edits
-    in either copy are fine — only a difference in what the plan *says* fails.
+    The appendix used to quote the plan verbatim, which made the doc a second copy
+    of the file rather than a definition of its format. It now walks the graph in a
+    table, so the anti-drift check is that every node appears with the kind and
+    stage it actually has — not that two YAML blobs are byte-identical.
     """
     doc = (REPO / "docs" / "architecture.md").read_text()
-    blocks = re.findall(r"```yaml\n(plan: greenfield\n.*?)\n```", doc, re.S)
-    assert len(blocks) == 1, "expected exactly one greenfield plan block in the doc"
+    section = doc.split("### A.5 The worked greenfield graph", 1)
+    assert len(section) == 2, "Appendix A no longer walks the greenfield graph"
+    table = section[1].split("### A.6", 1)[0]
 
-    documented = yaml.safe_load(blocks[0])
-    actual = yaml.safe_load((REPO / "plans" / "greenfield.yaml").read_text())
-    assert documented == actual, (
-        "docs/architecture.md Appendix A has drifted from plans/greenfield.yaml"
-    )
+    rows = {
+        match.group(1): match.group(2)
+        for match in re.finditer(r"^\| `([a-z-]+)` \| ([^|]+?) \|", table, re.M)
+    }
+
+    plan = yaml.safe_load((REPO / "plans" / "greenfield.yaml").read_text())
+    for node in plan["nodes"]:
+        assert node["id"] in rows, (
+            f"Appendix A does not document node '{node['id']}' — the table has "
+            f"drifted from plans/greenfield.yaml"
+        )
+        documented_kind = rows[node["id"]].split()[0].strip()
+        assert documented_kind == node["kind"], (
+            f"Appendix A calls '{node['id']}' a {documented_kind}; the plan says "
+            f"{node['kind']}"
+        )
+
+    unknown = set(rows) - {node["id"] for node in plan["nodes"]}
+    assert not unknown, f"Appendix A documents nodes that no longer exist: {sorted(unknown)}"
+
+
+def test_appendix_a_documents_every_node_key_the_engine_accepts():
+    """A format reference that omits a key is how a plan author learns it exists too late.
+
+    `Node` is `extra="forbid"`, so its field set *is* the accepted vocabulary. If a
+    field is added to the model without reaching the doc, the appendix silently
+    becomes a partial definition — which is the defect this appendix was rewritten
+    to fix.
+    """
+    from orchestrator.engine.plan import Node, Plan
+
+    doc = (REPO / "docs" / "architecture.md").read_text()
+    appendix = doc.split("## Appendix A", 1)[1]
+
+    def documented(field: str) -> bool:
+        return f"`{field}`" in appendix
+
+    for name, field in Node.model_fields.items():
+        key = field.alias or name          # `from_` is authored as `from`
+        assert documented(key), f"Appendix A does not define the node key '{key}'"
+
+    for name, field in Plan.model_fields.items():
+        key = field.alias or name          # `name` is authored as `plan`
+        assert documented(key), f"Appendix A does not define the top-level key '{key}'"
 
 
 def test_generated_schemas_match_their_models():

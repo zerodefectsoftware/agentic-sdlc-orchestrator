@@ -348,8 +348,9 @@ engine's surface stays small enough to reason about precisely because the intere
 variation lives outside it.
 
 It also makes the system legible: a reviewer can read the SDLC directly out of one file,
-rather than inferring it from control flow. **Appendix A** is the complete greenfield plan,
-followed by the entire brownfield delta.
+rather than inferring it from control flow. **Appendix A** defines the plan file format —
+every key, what each node kind requires, and how references resolve — then walks the
+greenfield graph and the brownfield and ambiguous deltas built on it.
 
 ### 4.8 The Worker interface (D18)
 
@@ -806,253 +807,255 @@ and a test says so.
 
 ---
 
-## Appendix A — Worked plan graph
+## Appendix A — The plan file format
 
-The engine is fixed; this file is the SDLC. `plans/greenfield.yaml`:
+A plan file is the SDLC, written as data (D16). The engine is fixed; adding a stage means
+editing a plan, not the scheduler. This appendix defines the format. `src/orchestrator/engine/plan.py`
+is its executable copy — if the two disagree, that file is right and this one is a bug.
+
+Every model is `extra="forbid"`. An unrecognised key is a load-time error naming the node
+and the key, never a silently ignored line — a misspelled `gate:` that disabled a gate
+would be indistinguishable from a plan that meant to have none.
+
+### A.1 Top level
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `plan` | yes | Plan name. Loaded as `Plan.name` |
+| `version` | yes | Integer. Bumped when the graph's meaning changes |
+| `description` | no | One line, shown by `preflight` and in the evidence bundle |
+| `defaults` | no | Per-node fallbacks — see A.2 |
+| `rollback` | no | `restore_from` (a node id) + `verify_with` (a command). Greenfield declares none: there is no prior state to restore |
+| `nodes` | yes | The graph. Order in the file is irrelevant; `needs` is the order |
+| `extends` | no | Compose onto another plan in the same directory — see A.6 |
+| `insert_after`, `override`, `remove` | no | Composition directives; only meaningful with `extends` |
+
+`defaults` applies to any node that does not override the key:
+
+| Key | Default | Applied to |
+| --- | --- | --- |
+| `model` | none | `agent` and `codeagent` only |
+| `effort` | `high` | `agent` and `codeagent` only |
+| `retry_budget` | `2` | every node |
+| `autonomy` | `AUTO` | every node |
+
+`model` and `effort` are withheld from non-model nodes deliberately: a default model
+attached to a subprocess would be a false entry in the lineage record.
+
+`rollback.restore_from` must name a node that declares `outputs`. A restore point holding
+no recorded state is a failure control in name only, and the loader rejects it.
+
+### A.2 Node keys
+
+**Identity and order**
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `id` | yes | Unique within the plan. Every reference elsewhere uses it |
+| `kind` | yes | One of the six in A.3 |
+| `stage` | yes | `requirements`, `design`, `implementation`, `verification`, `documentation`, `release`. **A label, not an ordering constraint** — `tests-acceptance` is verification work that runs before implementation (D5). Order comes only from `needs` |
+| `needs` | no | Node ids this node waits for. The only source of execution order |
+| `optional` | no (default `false`) | Instantiated only when something triggers it — an escalation target, or a step that activates with the checkpoint it processes |
+
+**What it consumes and produces**
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `inputs` | no | Upstream artifact references — see A.4 for how they resolve |
+| `outputs` | no | Logical output names. Each becomes the artifact `<node_id>.<name>` |
+| `output_files` | no | `codeagent` only. Maps an output name to the path in the repo the session must write it to |
+| `output_schema` | `agent` only | Path to a registered schema. An agent with no contract cannot produce a gateable artifact, so this is required for that kind |
+| `emits` | no | Names something the engine assembles rather than a worker producing it — `release-readiness` emits `evidence_bundle` |
+
+**Kind-specific configuration**
+
+| Key | Used by | Meaning |
+| --- | --- | --- |
+| `role` | `agent`, `codeagent` | Prompt file stem in `prompts/`. `role: analyst` → `prompts/analyst.md` |
+| `run` | `tool`, `derive` | `py:<dotted.path>` for an importable callable, or `sh:<command>` for a shell command. **The scheme prefix is mandatory** — a shell command that happens to look like a module path would otherwise fail bafflingly |
+| `params` | `tool`, `derive`, `codeagent` | Arguments passed to the callable or session (`max_turns`, `timeout_s`, `root`, …) |
+| `from` | `derive`, `fanout` | The artifact the derivation or fan-out reads |
+| `template` | `fanout` | The per-item node shape. A node minus its identity: `kind`, `role`, `inputs`, `verify`, `write_scope`, `freeze_paths`, `gate`, `model`, `effort`, `retry_budget`, `autonomy`. It has no `needs` — a child has no upstream to inherit |
+| `presents` | `human` | Artifact references shown to the person at the checkpoint |
+
+**Gates**
+
+| Key | Meaning |
+| --- | --- |
+| `verify` | Checks **the engine runs** after the node's work, producing the facts gates read. Same `py:`/`sh:` scheme rule as `run`. The node does not run these — D4 requires a non-producer |
+| `entry_gate` | Evaluated before the node executes |
+| `gate` | The exit gate. `all:` and/or `any:`, at least one check between them |
+| `on_fail` | The gate **ran and did not hold**. `insert` (node id), `scoped_to`, `max_attempts` (≥1, default 2), `then` |
+| `on_error` | The gate **could not be evaluated**. `retries` (≥0, default 0), `then` |
+
+`then` is `escalate` (default), `safe_stop`, or `rollback`.
+
+`on_error` deliberately cannot insert a fix node. A fix is a code change; an ERROR is not a
+code problem. An unimplemented predicate is exactly as missing on the second attempt, so
+running the repair loop against it burns retry budget and model calls to delay the real
+signal — that the harness needs attention, not the work.
+
+A gate check is written one of two ways, and both are shown throughout the plans:
 
 ```yaml
-plan: greenfield
-version: 1
-description: Requirement → reviewable change set, from an empty target.
-
-defaults:
-  model: claude-opus-5
-  effort: high
-  retry_budget: 2
-  autonomy: AUTO
-
-nodes:
-
-  # ── Understand ──────────────────────────────────────────────────────────
-  - id: intake
-    kind: agent
-    stage: requirements
-    role: analyst
-    output_schema: schemas/requirement_register.json
-    outputs: [register]              # gates read intake.register
-    effort: medium                    # structured extraction; depth adds little
-    gate:                             # G1
-      all:
-        - predicate: schema_valid
-        - predicate: every_requirement_has_testable_ac
-
-  - id: ambiguity-triage
-    kind: tool                        # policy evaluation, not a judgment call
-    stage: requirements
-    needs: [intake]
-    run: py:orchestrator.policy.triage_ambiguities
-    retry_budget: 0                   # pure function: a second run cannot disagree
-    escalate_when:
-      predicate: has_high_severity_ambiguity
-    on_escalate: clarify-with-human
-    gate:                             # G2 — the policy ran, not that nothing needs a human.
-      all:                            # An open HIGH ambiguity is this node working, and
-                                      # gating on its absence would fail exactly then.
-        - predicate: every_ambiguity_is_disposed_or_escalated
-
-  - id: clarify-with-human
-    kind: human
-    stage: requirements
-    optional: true                    # only instantiated when triage escalates
-    autonomy: APPROVE
-    presents: [intake.artifacts.register]
-
-  - id: normalize-clarification
-    kind: tool
-    stage: requirements
-    needs: [clarify-with-human]
-    optional: true                    # activated with the checkpoint it processes
-    run: py:orchestrator.policy.normalize_clarification
-    params:
-      checkpoint: clarify-with-human
-    inputs: [intake.artifacts.register]
-    outputs: [register]
-    # Without this, clarification is theatre: the run stops, a person answers,
-    # and the answer sits in the audit trail while design works from the same
-    # unresolved register. Re-emitting `intake.register` is also what makes it
-    # stateful — downstream consumers invalidate, bound approvals go stale (D10).
-    gate:                             # G2b
-      all:
-        - "clarification.resolved > 0"
-        - predicate: no_ambiguity_without_disposition
-
-  # ── Design ──────────────────────────────────────────────────────────────
-  - id: design
-    kind: agent
-    stage: design
-    role: architect
-    needs: [ambiguity-triage, normalize-clarification]   # SKIPPED when nothing escalated
-    inputs: [intake.artifacts.register]
-    output_schema: schemas/design.json
-    outputs: [spec, modules]          # gates read design.spec;
-                                      # impl fans out over design.modules
-    gate:                             # G3
-      all:
-        - predicate: contract_is_valid          # a predicate, not an expression:
-                                                # only the artifact holds the contract,
-                                                # and its author cannot vouch for it
-        - predicate: requirement_design_matrix_complete   # both directions
-        - predicate: no_unmapped_design_elements          # catches gold-plating
-
-  - id: design-approval
-    kind: human
-    stage: design
-    needs: [design]
-    autonomy: APPROVE
-    binds_to: [design.artifacts.spec]
-    # binds_to implements D10: if either artifact is re-derived, this
-    # approval reverts to pending and G10 blocks.
-
-  # ── Build ───────────────────────────────────────────────────────────────
-  - id: scaffold
-    kind: derive                      # deterministic generation (D8), no model call
-    stage: implementation
-    needs: [design-approval]
-    inputs: [design.artifacts.spec]   # design-approval is a human node: it
-                                      # produces no artifact to inherit
-    run: py:orchestrator.derive.scaffold_from_design
-    params:
-      root: "{target.root}"
-    outputs: [manifest]
-    write_scope: ["{target.root}/**"]
-    verify:                           # the engine runs these; the node does not
-      - "sh:{target.commands.lint}"
-      - py:orchestrator.gates.imports_resolve
-    gate:                             # G4
-      all:
-        - "imports.resolve == true"
-        - "ruff.exit_code == 0"
-
-  - id: tests-acceptance
-    kind: codeagent
-    stage: verification
-    role: test-author                 # deliberately NOT the implementer (D5)
-    outputs: [suite]                  # gates read tests-acceptance.suite
-    output_files:                     # ...and the agent writes it here
-      suite: "{target.tests_root}/acceptance_suite.json"
-    needs: [scaffold]
-    inputs: [intake.artifacts.register, design.artifacts.spec]
-    write_scope: ["{target.tests_root}/**"]
-    verify:
-      - "sh:{target.commands.test}"   # a code agent cannot report its own red
-    gate:                             # G5 — the RED gate
-      all:
-        - "session.files_written > 0"
-        - "pytest.exit_code != 0"     # must FAIL against the scaffold
-        - predicate: every_ac_has_a_test
-
-  - id: impl
-    kind: codeagent
-    stage: implementation
-    role: implementer
-    needs: [tests-acceptance]
-    inputs: [design.artifacts.spec, intake.artifacts.register]
-    # One author for the whole target, not one per module. A greenfield build
-    # has no interfaces yet: the names modules call each other by are decided
-    # *while* the code is written, so parallel authors agree on them only by
-    # luck. A live run showed exactly that — `links` importing three exception
-    # names from a module whose author had not run.
-    #
-    # The cost is real and accepted: no parallelism in implementation, and the
-    # blast radius is the whole target rather than one directory (D7 is reduced
-    # to the target boundary here). Brownfield keeps the fan-out, where the
-    # interfaces already exist in the codebase being changed. See D23.
-    write_scope: ["{target.root}/**"]
-    freeze_paths: ["{target.tests_root}/**"]   # D6: not the suite judging it
-    params:
-      root: "{target.root}"
-      max_turns: 200          # seven modules is not a one-module job
-      timeout_s: 3600
-    verify:
-      - "sh:{target.commands.lint}"
-      - py:orchestrator.gates.imports_resolve
-    gate:                             # G6
-      all:
-        - "session.files_written > 0"
-        - "ruff.exit_code == 0"
-        - "imports.resolve == true"   # the modules have to import each other
-
-  # ── Verify (parallel, then join) ────────────────────────────────────────
-  - id: tests
-    kind: tool
-    stage: verification
-    needs: [impl]
-    run: "sh:{target.commands.test_cov}"
-    params:
-      coverage_report: coverage.json   # written by the command above
-    verify:
-      - py:orchestrator.gates.report_coverage
-    freeze_paths: ["{target.tests_root}/**"]  # D6: immutable during repair
-    gate:                              # G7 — the GREEN gate
-      all:
-        - "pytest.exit_code == 0"
-        - "coverage.percent >= {target.thresholds.coverage_min}"
-        - predicate: ac_test_matrix_complete
-    on_fail:
-      insert: fix
-      scoped_to: failing_module
-      max_attempts: 2
-      then: escalate
-
-  - id: docs
-    kind: codeagent
-    stage: documentation
-    role: technical-writer
-    outputs: [readme]                 # gates read docs.readme
-    output_files:
-      readme: target/README.md
-    needs: [impl]
-    inputs: [design.artifacts.spec, intake.artifacts.register]
-    effort: medium
-    write_scope: ["target/README.md", "target/docs/**"]
-    gate:                             # G8 — executable documentation
-      all:
-        - "session.files_written > 0"
-        - predicate: setup_steps_execute_in_clean_venv
-        - predicate: documented_endpoints_match_openapi
-
-  - id: security
-    kind: tool
-    stage: verification
-    needs: [impl]
-    run: py:orchestrator.gates.security_scan
-    outputs: [report]                 # gates read security.report
-    autonomy: REVIEW
-    escalate_when:                    # policy overrides the node default
-      predicate: has_high_severity_finding
-    may_waive: false                  # D15: agents never waive findings
-    gate:                             # G9
-      all:
-        - predicate: no_unapproved_high_findings
-
-  # ── Release readiness ───────────────────────────────────────────────────
-  - id: release-readiness
-    kind: derive                      # deterministic by design (D9)
-    stage: release
-    needs: [tests, docs, security]    # sync barrier — needs is the join
-    emits: evidence_bundle            # assembled by the engine: it reads four stores
-    gate:                             # G10
-      all:
-        - predicate: all_upstream_gates_green
-        - predicate: no_unapproved_high_findings
-        - predicate: no_ambiguity_without_disposition   # nothing ships with an open question
-        - predicate: lineage_complete
-        - predicate: no_node_in_nonterminal_state
-        - predicate: no_stale_approvals
-
-  - id: accept
-    kind: human
-    stage: release
-    needs: [release-readiness]
-    autonomy: APPROVE
-    presents: [release-readiness.artifacts.evidence_bundle]
+gate:
+  all:
+    - "pytest.exit_code == 0"        # expression over facts from `verify`
+    - predicate: no_stale_approvals  # named predicate the engine registers
 ```
 
-Two forms of gate appear, as described in §4.7: **expressions** over tool results
-(`pytest.exit_code == 0`) and **named predicates** for semantics no expression should carry
-(`no_stale_approvals`). The engine registers the predicates; the plan composes them.
+An expression reads facts produced by `verify` and the workers, namespaced by tool
+(`pytest.exit_code`, `ruff.exit_code`, `coverage.percent`, `session.files_written`,
+`imports.resolve`). A predicate carries semantics no expression should — traceability
+matrices, stale-approval detection, lineage completeness. `Plan.required_predicates`
+collects every predicate a plan names, and `preflight` refuses to start a run when the
+engine cannot supply one, rather than discovering it at the gate and having to invent a
+verdict.
 
-### The brownfield delta, in full
+**Governance**
+
+| Key | Meaning |
+| --- | --- |
+| `autonomy` | `AUTO` (proceeds, gated and logged), `REVIEW` (proceeds, flagged, non-blocking), `APPROVE` (blocks for a human), `FORBIDDEN` (denied, escalates). A `human` node may only be `APPROVE` or unset |
+| `escalate_when` | A condition in the gate vocabulary — a bare string is an expression, or `predicate:`. When it holds, the run escalates |
+| `on_escalate` | The node id to escalate to. **Requires `escalate_when`**; the loader rejects one without the other, since an unreachable escalation target is dead graph |
+| `binds_to` | Artifact references this approval is bound to (D10). If a bound artifact is re-derived, the approval reverts to pending and G10 blocks |
+| `may_waive` | Default `true`. `false` means no agent may waive a finding here (D15) |
+
+**Blast radius**
+
+| Key | Meaning |
+| --- | --- |
+| `write_scope` | Glob patterns this node may write (D7). Required for `codeagent`. Every pattern must fall inside the profile's `write_ceiling`, checked at load — a misbehaving agent cannot reach the orchestrator that governs it |
+| `freeze_paths` | Paths immutable for the duration of this node (D6) — how `impl` is stopped from editing the suite that judges it |
+
+**Cost and depth**
+
+`model`, `effort` (`low`/`medium`/`high`), `retry_budget` — each overriding `defaults`.
+These live per-node rather than in `.env` so a run's cost profile stays in the artifact
+that describes the run.
+
+### A.3 What each kind requires
+
+| Kind | Requires | Consumes model tokens | Notes |
+| --- | --- | --- | --- |
+| `agent` | `role`, and `output_schema` at execution | yes | Model call producing a schema-constrained artifact. No filesystem access |
+| `codeagent` | `role`, `write_scope` | yes | Coding-agent session, write-scoped to declared paths |
+| `tool` | `run` | no | Deterministic command; its exit code and parsed output are the result |
+| `derive` | one of `from`, `run`, `emits` | no | Deterministic generation from a contract (D8). A derivation that says nothing about where its output comes from is rejected |
+| `human` | — | no | Approval or clarification checkpoint. Produces no artifact; its decision text becomes `<node_id>.decision` |
+| `fanout` | `from`, `template` | no | Materialises N children from an upstream artifact. Does no work itself — it shapes the graph |
+
+### A.4 How references resolve
+
+**`needs: [node_id]`** — bare node ids. Validated at load: naming a node that does not
+exist is a load error, as is a cycle.
+
+**`outputs: [name]`** on node `design` produces the artifact `design.spec`, whose body is
+written to:
+
+```
+runs/<run_id>/artifacts/design.spec/v1
+runs/<run_id>/artifacts/design.spec/v2      # a re-derivation, visible at a glance
+```
+
+Laid out by name and version rather than by content hash: `v1` next to `v2` shows a
+re-derivation to a reader, which is the point of the evidence bundle. The database records
+identity — name, version, hash, producer — and the disk holds what it said, so a reviewer
+uses `cat` and not a SQL client.
+
+For an `agent`, one model response is split across the declared outputs: **an output whose
+name matches a field of the schema is that field; any other name gets the whole model.**
+So `design` declaring `outputs: [spec, modules]` yields `design.spec` (the entire
+structured response) and `design.modules` (just the list the fan-out reads) from a single
+call.
+
+For a `codeagent`, `output_files` maps an output name to a path the session must write:
+
+```yaml
+outputs: [suite]
+output_files:
+  suite: "{target.tests_root}/acceptance_suite.json"
+```
+
+A declared file the session did not write is a **worker error**, not an empty artifact.
+Silently recording nothing would surface much later as a gate that "could not be
+performed", hiding whose fault it was.
+
+**`inputs: [intake.artifacts.register]`** — the three-part form is `<node_id>.artifacts.<output_name>`.
+The same form is used by `presents`, `binds_to`, and `from`.
+
+One caveat worth stating plainly, because the notation over-promises: **at execution the
+scheduler resolves this at node granularity, not artifact granularity.** It takes the
+`<node_id>` prefix and loads *every* output that node produced, at its latest version. It
+does the same for each entry in `needs`. So `inputs` today declares *which upstream nodes
+this one reads from* — the third segment documents intent and is not a filter. Two
+consequences:
+
+- A node that `needs` an upstream also receives that upstream's artifacts without listing
+  them in `inputs`.
+- Naming one output of a two-output node does not exclude the other.
+
+Every node also receives, without declaring it:
+
+| Key in the material | Contents |
+| --- | --- |
+| `requirement` | The text of the run's requirement file (`requirements/greenfield.md`) |
+| `<node_id>.decision` | For each upstream `human` node, what the person actually said |
+
+The second is what makes a checkpoint more than theatre — see the ambiguous delta below.
+
+**`{target.*}`** placeholders resolve from the target profile (`config/target.shortener.yaml`)
+at **load time**, before validation, so `preflight` and `--dry-run` print the command that
+would really run. A whole-string placeholder keeps its type, so
+`"{target.thresholds.coverage_min}"` reaches a gate expression as `80` and not `"80"`. An
+unresolvable placeholder is an error: executing the literal string `{target.commands.test}`
+would fail as "command not found", which reads like a broken environment rather than a
+broken plan.
+
+**`{item.*}`** is deliberately *not* resolved at load. It belongs to fan-out
+materialisation and is substituted per child at runtime.
+
+### A.5 The worked greenfield graph
+
+`plans/greenfield.yaml` is the file; it is commented and meant to be read directly rather
+than duplicated here, where a copy would drift. Its shape:
+
+| Node | Kind | Stage | Needs | Outputs | Exit gate |
+| --- | --- | --- | --- | --- | --- |
+| `intake` | agent (`analyst`) | requirements | — | `register` | G1 schema valid; every requirement has a testable AC |
+| `ambiguity-triage` | tool | requirements | `intake` | — | G2 every ambiguity disposed **or** escalated |
+| `clarify-with-human` | human | requirements | — (optional) | — | — |
+| `normalize-clarification` | tool | requirements | `clarify-with-human` | `register` (v+1) | G2b something was resolved; no ambiguity left undisposed |
+| `design` | agent (`architect`) | design | triage, normalize | `spec`, `modules` | G3 contract valid; requirement↔design matrix complete both ways; no unmapped design elements |
+| `design-approval` | human | design | `design` | — | binds to `design.spec` (D10) |
+| `scaffold` | derive | implementation | `design-approval` | `manifest` | G4 imports resolve; lint clean |
+| `tests-acceptance` | codeagent (`test-author`) | verification | `scaffold` | `suite` | **G5 the RED gate** — files written, `pytest.exit_code != 0`, every AC has a test |
+| `impl` | codeagent (`implementer`) | implementation | `tests-acceptance` | — | G6 files written; lint clean; imports resolve |
+| `tests` | tool | verification | `impl` | — | **G7 the GREEN gate** — pytest passes, coverage ≥ threshold, AC↔test matrix complete |
+| `docs` | codeagent (`technical-writer`) | documentation | `impl` | `readme` | G8 setup steps execute in a clean venv; documented endpoints match the OpenAPI |
+| `security` | tool | verification | `impl` | `report` | G9 no unapproved high findings. `may_waive: false` |
+| `release-readiness` | derive | release | `tests`, `docs`, `security` | `evidence_bundle` | G10 six predicates — see below |
+| `accept` | human | release | `release-readiness` | — | — |
+
+Three structural points the table makes visible:
+
+*The gate ordering is inverted on purpose.* `tests-acceptance` is verification work sitting
+between two implementation nodes, and its gate demands **failure**. Tests authored by the
+implementer against code that already exists prove nothing (D5); a suite that does not go
+red against an empty scaffold is not testing anything.
+
+*`needs` is the only synchronisation primitive.* `tests`, `docs`, and `security` all name
+`impl` and nothing else, so they run in parallel. `release-readiness` names all three,
+which is the join — no separate barrier construct exists or is needed.
+
+*G10 is where the run's whole history is re-checked*, not just the last node:
+`all_upstream_gates_green`, `no_unapproved_high_findings`, `no_ambiguity_without_disposition`
+(nothing ships with an open question), `lineage_complete`, `no_node_in_nonterminal_state`,
+and `no_stale_approvals` (D10 — an approval whose artifact was re-derived after the fact
+does not count).
+
+### A.6 Composition — the brownfield delta
 
 `plans/brownfield.yaml`, quoted here in the parts that carry the argument. Adding a
 scenario means adding **nodes and overrides — no new node kinds, no engine change**:
@@ -1138,7 +1141,7 @@ what "this scenario does not scaffold" looks like.
 prints the command that would actually run. `{item.path}` is left alone: it belongs to
 fan-out materialisation, and is resolved per item at runtime.
 
-### The ambiguous delta
+### A.7 The ambiguous delta
 
 `plans/ambiguous.yaml` changes four things and adds one node. Three of them are the
 scenario:
